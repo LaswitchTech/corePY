@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# src/app/network/diagnostic.py
+# src/core/network/diagnostic.py
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QTextEdit, QWidget
 )
 
-from app.helper import Helper
-from app.ui import StepIndicator
+from core.helper import Helper
+from core.ui import StepIndicator
 from .tools import Tools
 
 class Diagnostic(QThread):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# src/app/network/tools.py
+# src/core/network/tools.py
 
 import shutil
 import socket
@@ -8,7 +8,7 @@ from typing import Optional
 from PyQt5.QtWidgets import QApplication
 
 try:
-    from app.helper import Helper
+    from core.helper import Helper
 except ImportError:
     from helper import Helper
 
