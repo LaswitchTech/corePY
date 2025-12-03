@@ -11,7 +11,10 @@
 corePY is a framework of libraries designed to facilitate the creation of python-based applications.
 
 ## Features
-  - **Cross-Platform Compatibility**: corePY is compatible with both macOS and Linux, with specific adjustments made to ensure seamless operation on both operating systems.
+  - **Uniform Styling**: corePY provides a consistent look and feel across all applications built using its libraries.
+  - **Modular Architecture**: The framework is designed with modularity in mind, allowing developers to easily integrate and extend functionality.
+  - **Cross-Platform Support**: corePY is compatible with multiple operating systems, ensuring broad accessibility for users.
+  - **Command-Line**: corePY includes a robust command-line interface for managing applications and performing various tasks.
 
 ## License
 This software is distributed under the [GPLv3](LICENSE) license.
