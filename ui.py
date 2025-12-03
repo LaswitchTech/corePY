@@ -28,10 +28,10 @@ except ImportError:  # likely running as a top-level script
 class MsgBox(QDialog):
 
     ICONS = {
-        "info":    "icons/info.svg",
-        "error":   "icons/error.svg",
-        "warning": "icons/warning.svg",
-        "question":"icons/question.svg",
+        "info":    "core/icons/info.svg",
+        "error":   "core/icons/error.svg",
+        "warning": "core/icons/warning.svg",
+        "question":"core/icons/question.svg",
     }
 
     def __init__(
@@ -527,7 +527,7 @@ class Form:
         helper = Helper()
         btn = QPushButton(label)
         if icon:
-            icon_path = helper.get_path(f"icons/{icon}.svg")
+            icon_path = helper.get_path(f"core/icons/{icon}.svg")
             if icon_path:
                 if helper.file_exists(icon_path):
                     renderer = QSvgRenderer(icon_path)
