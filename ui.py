@@ -459,7 +459,7 @@ class WiFiButton(QPushButton):
             self._tools = Tools()
         except Exception as e:
             print(f"[WiFiButton] Failed to initialize network Tools: {e}")
-            self._tools = None
+        self._tools = None
 
         return self._tools
 
