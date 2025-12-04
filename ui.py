@@ -22,8 +22,10 @@ import base64
 # Allow this module to be used both as part of the 'app' package and as a standalone script
 try:
     from .helper import Helper
+    from .network.tools import Tools
 except ImportError:  # likely running as a top-level script
     from helper import Helper
+    from network.tools import Tools
 
 class MsgBox(QDialog):
 
@@ -453,8 +455,7 @@ class WiFiButton(QPushButton):
             return self._tools
 
         try:
-            from network.tools import Tools as NetTools
-            self._tools = NetTools()
+            self._tools = Tools()
         except Exception as e:
             print(f"[WiFiButton] Failed to initialize network Tools: {e}")
             self._tools = None
