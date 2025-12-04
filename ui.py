@@ -54,6 +54,7 @@ class MsgBox(QDialog):
 
         self._selected: Optional[str] = None
         self._icon_lookup = icon_lookup_fn
+        self._helper = None
 
         if isinstance(buttons, str):
             buttons = (buttons,)
