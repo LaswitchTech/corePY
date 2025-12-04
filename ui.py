@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QHBoxLayout, QPushButton,
     QLineEdit, QSpinBox, QComboBox, QCheckBox, QColorDialog,
     QSizePolicy, QStyle, QStyleOptionButton, QWidget, QFileDialog,
-    QListView, QFrame
+    QListView, QFrame, QApplication, QListWidget
 )
 from PyQt5.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QPen
@@ -416,6 +416,139 @@ class FileInput(QWidget):
         if self._on_changed:
             self._on_changed(value)
 
+class WiFiButton(QPushButton):
+
+    def __init__(self, parent=None, label: str = "Connect"):
+        super().__init__(label, parent)
+        self._ssid: str = ""
+        self._tools = None  # lazy-loaded network.Tools instance
+        self.clicked.connect(self._on_click)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def value(self) -> str:
+        """
+        Return the currently selected SSID (or "" if none).
+        """
+        return self._ssid
+
+    def setValue(self, ssid: str):
+        """
+        Set the currently selected SSID and update the button label.
+        """
+        self._ssid = ssid or ""
+        self.setText(self._ssid or "Connect")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _ensure_tools(self):
+        """
+        Lazily import and instantiate network.tools.Tools.
+        """
+        if self._tools is not None:
+            return self._tools
+
+        try:
+            from network.tools import Tools as NetTools
+            self._tools = NetTools()
+        except Exception as e:
+            print(f"[WiFiButton] Failed to initialize network Tools: {e}")
+            self._tools = None
+
+        return self._tools
+
+    def _on_click(self):
+        tools = self._ensure_tools()
+        if tools is None:
+            MsgBox.show(
+                parent=self,
+                title="Wi-Fi",
+                message="Network tools are not available.",
+                icon="error",
+            )
+            return
+
+        # --- 1) Show a small dialog that immediately displays the scanning message ---
+        dlg = QDialog(self)
+        dlg.setModal(True)
+        dlg.setWindowTitle("Wi-Fi Networks")
+
+        layout = QVBoxLayout(dlg)
+        scanning_label = QLabel("Scanning Access Points...")
+        layout.addWidget(scanning_label)
+
+        dlg.show()
+        QApplication.processEvents()
+
+        # Perform the scan (synchronously)
+        try:
+            networks = tools.scan_ap()
+        except Exception as e:
+            print(f"[WiFiButton] Failed to scan Wi-Fi networks: {e}")
+            networks = []
+
+        # Clear the "Scanning..." UI
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        # --- 2) If no networks found, show a simple message + Close button ---
+        if not networks:
+            info = QLabel("No Wi-Fi networks found.")
+            layout.addWidget(info)
+
+            btn_row = QHBoxLayout()
+            btn_row.addStretch(1)
+            close_btn = QPushButton("Close", dlg)
+            close_btn.clicked.connect(dlg.reject)
+            btn_row.addWidget(close_btn)
+            layout.addLayout(btn_row)
+
+            dlg.exec_()
+            dlg.deleteLater()
+            return
+
+        # --- 3) Show list of access points + Connect / Cancel buttons ---
+        list_widget = QListWidget(dlg)
+        list_widget.addItems(networks)
+        layout.addWidget(list_widget)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel_btn = QPushButton("Cancel", dlg)
+        ok_btn = QPushButton("Connect", dlg)
+
+        def on_ok():
+            # Require a selection to accept
+            if list_widget.currentItem() is not None:
+                dlg.accept()
+
+        cancel_btn.clicked.connect(dlg.reject)
+        ok_btn.clicked.connect(on_ok)
+
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        layout.addLayout(btn_row)
+
+        def on_item_double_clicked(_item):
+            dlg.accept()
+
+        list_widget.itemDoubleClicked.connect(on_item_double_clicked)
+
+        result = dlg.exec_()
+        selected_ssid = ""
+        if result == QDialog.Accepted and list_widget.currentItem() is not None:
+            selected_ssid = list_widget.currentItem().text().strip()
+
+        dlg.deleteLater()
+        self.setValue(selected_ssid)
+
 class StepIndicator(QWidget):
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
@@ -566,3 +699,10 @@ class Form:
             as_base64=as_base64,
             on_changed=on_changed,
         )
+
+    @staticmethod
+    def wifi(current: str = "") -> WiFiButton:
+        btn = WiFiButton()
+        if current:
+            btn.setValue(current)
+        return btn

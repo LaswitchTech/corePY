@@ -4,7 +4,8 @@
 import shutil
 import socket
 import re
-from typing import Optional
+import subprocess
+from typing import Optional, List
 from PyQt5.QtWidgets import QApplication
 
 try:
@@ -407,3 +408,38 @@ class Tools:
                 results[str(port)] = False
 
         return results
+
+    def scan_ap(self) -> List[str]:
+        ssids: List[str] = []
+
+        # --- Prefer nmcli if available ---
+        if shutil.which("nmcli"):
+            try:
+                out = subprocess.check_output(
+                    ["nmcli", "-t", "-f", "SSID", "dev", "wifi"],
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                for line in out.splitlines():
+                    s = line.strip()
+                    if s and s not in ssids:
+                        ssids.append(s)
+            except Exception as e:
+                print(f"[Tools] nmcli wifi scan failed: {e}")
+
+        # --- Fallback to iwlist if no SSIDs yet ---
+        if not ssids and shutil.which("iwlist"):
+            try:
+                out = subprocess.check_output(
+                    ["iwlist", "scan"],
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                for m in re.finditer(r'ESSID:"([^"]*)"', out):
+                    s = m.group(1).strip()
+                    if s and s not in ssids:
+                        ssids.append(s)
+            except Exception as e:
+                print(f"[Tools] iwlist wifi scan failed: {e}")
+
+        return ssids
