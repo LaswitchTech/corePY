@@ -68,7 +68,6 @@ class MsgBox(QDialog):
 
         if icon:
             icon_path = self._resolve_icon_path(icon)
-            print(f"[MsgBox] Resolved icon '{icon}' to '{icon_path}'")
             if icon_path:
                 svg = QSvgWidget(icon_path)
                 svg.setFixedSize(icon_size, icon_size)
@@ -99,7 +98,24 @@ class MsgBox(QDialog):
             self._buttons[default].setDefault(True)
             self._buttons[default].setFocus()
 
-    # -------------------------------------------------
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _ensure_helper(self):
+        """
+        Lazily import and instantiate helper.
+        """
+        if self._helper is not None:
+            return self._helper
+
+        try:
+            self._helper = Helper()
+        except Exception as e:
+            print(f"[MsgBox] Failed to initialize helpers: {e}")
+            self._helper = None
+
+        return self._helper
 
     def _resolve_icon_path(self, icon: str) -> Optional[str]:
         """
@@ -112,6 +128,11 @@ class MsgBox(QDialog):
             resolved = self._icon_lookup(candidate)
             if resolved:
                 return resolved
+        else:
+            if self._ensure_helper() is not None:
+                resolved = self._helper.get_path(candidate)
+                if resolved and self._helper.file_exists(resolved):
+                    return resolved
 
         return candidate
 
