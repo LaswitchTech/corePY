@@ -661,6 +661,10 @@ class Configuration(QObject):
                 as_base64=options.get("as_base64", False),
                 on_changed=options.get("on_changed", None),
             )
+        elif widget_type == "wifi":
+            w = Form.wifi(
+                current=current_value or ""
+            )
         elif widget_type == "button":
             w = Form.button(
                 label=options.get("label", "Button"),
