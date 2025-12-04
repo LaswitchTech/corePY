@@ -68,6 +68,7 @@ class MsgBox(QDialog):
 
         if icon:
             icon_path = self._resolve_icon_path(icon)
+            print(f"[MsgBox] Resolved icon '{icon}' to '{icon_path}'")
             if icon_path:
                 svg = QSvgWidget(icon_path)
                 svg.setFixedSize(icon_size, icon_size)
