@@ -29,6 +29,8 @@ class Helper:
         else:
             self.root_dir = root_dir
 
+        self.home_dir = os.path.expanduser("~")
+
     # ---------- OS / paths ----------
 
     def get_path(self, rel_path: str) -> str | None:
