@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable, Optional, Iterable
 
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtWidgets import (
@@ -12,8 +12,13 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QTextEdit, QWidget
 )
 
-from core.helper import Helper
-from core.ui import StepIndicator
+try:
+    from core.helper import Helper
+    from core.ui import StepIndicator
+except ImportError:
+    from helper import Helper
+    from ui import StepIndicator
+
 from .tools import Tools
 
 class Diagnostic(QThread):
@@ -37,6 +42,9 @@ class Diagnostic(QThread):
         # Parent for dialogs
         self._parent = None
 
+        # Hook lists for custom steps
+        self._before_service_steps: list[Callable[["Diagnostic"], bool | None]] = []
+
     # -------------------------------------------------
     # Small helpers
     # -------------------------------------------------
@@ -47,15 +55,15 @@ class Diagnostic(QThread):
     def _resolve_host(self, host: str) -> tuple[bool, str]:
         """
         Resolve a host using Tools.nslookup when necessary.
-        Returns (ok, ip_or_error).
+        Returns array or IPs or false.
         """
         if self._is_ip(host):
             return True, host
 
-        ok, ip = self._tools.nslookup(host)
-        if ok:
-            return True, ip
-        return False, ip or "Resolution failed"
+        ips = self._tools.nslookup(host)
+        if ips:
+            return True, ips[0]
+        return False, "Resolution failed"
 
     # -------------------------------------------------
     # Main run logic (4 phases: device, network, internet, service)
@@ -122,11 +130,12 @@ class Diagnostic(QThread):
         )
 
         # DNS test via Tools.nslookup
-        dns_ok, detail = self._tools.nslookup("google.com")
+        IPs = self._tools.nslookup("google.com")
+        dns_ok = bool(IPs)
         if dns_ok:
-            self.log.emit(f"Internet: DNS OK → {detail}")
+            self.log.emit(f"Internet: DNS OK → {IPs}")
         else:
-            self.log.emit(f"Internet: DNS failed: {detail}")
+            self.log.emit(f"Internet: DNS failed: {IPs or 'no valid addresses found.'}")
 
         internet_ok = pub_ok and dns_ok
         self.phase.emit("internet", "ok" if internet_ok else "fail")
@@ -143,6 +152,24 @@ class Diagnostic(QThread):
                 self.log.emit(f"Service: cannot resolve {self.host}: {addr}")
             else:
                 self.log.emit(f"Service: target {self.host} -> {addr} (ports: {self.ports})")
+
+                # Run any registered pre-service steps (e.g., VPN bring-up)
+                for step in list(self._before_service_steps):
+                    try:
+                        res = step(self)
+                    except Exception as e:
+                        self.log.emit(
+                            f"Service: pre-service step "
+                            f"{getattr(step, '__name__', repr(step))} raised {e!r}."
+                        )
+                        res = None
+
+                    # If a step explicitly returns False, abort service diagnostics
+                    if res is False:
+                        self.log.emit("Service: aborted by pre-service step.")
+                        self.phase.emit("service", "fail")
+                        self.summary.emit(network_ok, internet_ok, False)
+                        return
 
                 p_ok = self._tools.ping(addr)
                 self.log.emit(
@@ -178,24 +205,65 @@ class Diagnostic(QThread):
     # UI dialog helper
     # ------------------------------------------------------------------
 
-    def show(self, parent=None):
+    def show(
+        self,
+        parent: Optional[QWidget] = None,
+        before: Optional[Iterable[Callable[["Diagnostic"], bool | None]]] = None,
+        finished: Optional[Callable[[bool], None]] = None,
+    ):
         if parent is not None and isinstance(parent, QWidget):
             self._parent = parent
-        dlg = DiagnosticDialog(self.host, self.ports, parent=self._parent)
+
+        dlg = DiagnosticDialog(
+            self.host,
+            self.ports,
+            parent=self._parent,
+            before=before,
+        )
+
+        if finished is not None:
+            dlg.finished.connect(finished)
+
         dlg.exec_()
         dlg.raise_()
         dlg.activateWindow()
         return dlg
 
-class DiagnosticDialog(QDialog):
+    # ------------------------------------------------------------------
+    # Pre-service step registration
+    # ------------------------------------------------------------------
 
-    def __init__(self, host: str, ports: Any, parent=None):
+    def add(self, fn: Callable[["Diagnostic"], bool | None]) -> None:
+        """
+        Register a callback to run just before the service ping/port checks.
+
+        The callback will receive this Diagnostic instance as argument and can
+        emit logs via self.log.emit(...).
+
+        If the callback returns False explicitly, the service phase will be
+        marked as failed and the diagnostic will stop before pinging/port checks.
+        Any other return value (or no return) is treated as non-fatal.
+        """
+        if callable(fn):
+            self._before_service_steps.append(fn)
+
+class DiagnosticDialog(QDialog):
+    finished = pyqtSignal(bool)
+
+    def __init__(
+        self,
+        host: str,
+        ports: Any,
+        parent: Optional[QWidget] = None,
+        before: Optional[Iterable[Callable[["Diagnostic"], bool | None]]] = None,
+    ):
         super().__init__(parent)
 
         self._host = host or ""
         self._ports = ports
         self._helper = Helper()
         self._tools = Tools()
+        self._before_service_steps: list[Callable[["Diagnostic"], bool | None]] = list(before or [])
 
         self.setWindowTitle("Diagnostic")
         self.setObjectName("DiagnosticDialog")
@@ -299,6 +367,11 @@ class DiagnosticDialog(QDialog):
         ports = self._ports
 
         self._thr = Diagnostic(host=host, ports=ports, parent=self)
+
+        # Propagate any pre-service steps down to the worker thread
+        for step in self._before_service_steps:
+            self._thr.add(step)
+
         self._thr.log.connect(self._on_log)
         self._thr.phase.connect(self._on_phase)       # phase, state
         self._thr.summary.connect(self._on_summary)   # network, internet, service
@@ -327,3 +400,4 @@ class DiagnosticDialog(QDialog):
             return "Connected" if b else "Not connected"
 
         self._update_status_panel(t(network), t(internet), t(service))
+        self.finished.emit(service)
