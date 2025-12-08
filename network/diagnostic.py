@@ -3,223 +3,110 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any, Callable, Optional, Iterable
 
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QObject
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QWidget
 )
+from PyQt5.QtGui import QPixmap, QIcon
 
 try:
     from core.helper import Helper
-    from core.ui import StepIndicator
 except ImportError:
     from helper import Helper
-    from ui import StepIndicator
 
 from .tools import Tools
 
-class Diagnostic(QThread):
-    log     = pyqtSignal(str)
-    phase   = pyqtSignal(str, str)
-    summary = pyqtSignal(bool, bool, bool)
+class DiagnosticStep:
+    def __init__(
+        self,
+        name: str,
+        label: str,
+        icon: Optional[str],
+        func: Callable[[Callable[[str], None]], bool]
+    ):
+        self.name = name
+        self.label = label
+        self.icon = icon
+        self.func = func
 
-    def __init__(self, host: str, ports: Any, parent=None):
+class DiagnosticThread(QThread):
+    log = pyqtSignal(str)
+    step_state = pyqtSignal(str, str)  # name, state: idle|running|ok|fail
+    finished = pyqtSignal(dict)        # {step_name: bool}
 
-        # Initialize QThread
+    def __init__(self, steps: Iterable[DiagnosticStep], parent: Optional[QWidget] = None):
         super().__init__(parent)
-
-        # Initialize Helper and Tools
-        self._helper = Helper()
-        self._tools = Tools()
-
-        # Store host and ports
-        self.host = (host or "").strip()
-        self.ports = ports
-
-        # Parent for dialogs
-        self._parent = None
-
-        # Hook lists for custom steps
-        self._before_service_steps: list[Callable[["Diagnostic"], bool | None]] = []
-
-    # -------------------------------------------------
-    # Small helpers
-    # -------------------------------------------------
-
-    def _is_ip(self, value: str) -> bool:
-        return bool(re.match(r"^\d+\.\d+\.\d+\.\d+$", value.strip()))
-
-    def _resolve_host(self, host: str) -> tuple[bool, str]:
-        """
-        Resolve a host using Tools.nslookup when necessary.
-        Returns array or IPs or false.
-        """
-        if self._is_ip(host):
-            return True, host
-
-        ips = self._tools.nslookup(host)
-        if ips:
-            return True, ips[0]
-        return False, "Resolution failed"
-
-    # -------------------------------------------------
-    # Main run logic (4 phases: device, network, internet, service)
-    # -------------------------------------------------
+        self._steps = list(steps)
 
     def run(self):
-        # ---------------- DEVICE ----------------
-        self.phase.emit("device", "running")
+        results = {}
 
-        ips = self._tools.ip()
-        if not ips:
-            self.log.emit("Device: could not determine any local IPv4 address.")
-            self.phase.emit("device", "fail")
-            self.summary.emit(False, False, False)
-            return
+        def printer(msg: str) -> None:
+            self.log.emit(msg)
 
-        # pick the first non-APIPA, non-loopback IP from Tools.ip()
-        ip = None
-        for cand in ips:
-            if not cand.startswith("127.") and not self._tools.apipa(cand):
-                ip = cand
-                break
+        for step in self._steps:
+            self.step_state.emit(step.name, "running")
+            try:
+                res = step.func(printer)
+                ok = bool(res)
+            except Exception as e:
+                printer(f"[{step.label}] error: {e!r}")
+                ok = False
 
-        if not ip:
-            self.log.emit(f"Device: only APIPA/loopback addresses found: {ips}")
-            self.phase.emit("device", "fail")
-            self.summary.emit(False, False, False)
-            return
+            results[step.name] = ok
+            self.step_state.emit(step.name, "ok" if ok else "fail")
 
-        if self._tools.apipa(ip):
-            self.log.emit(f"Device: APIPA address {ip} (DHCP failure).")
-            self.phase.emit("device", "fail")
-            self.summary.emit(False, False, False)
-            return
+        self.finished.emit(results)
 
-        self.log.emit(f"Device: local IP is {ip}")
-        self.phase.emit("device", "ok")
+class Diagnostic(QObject):
+    def __init__(self, host: str, ports: Any, parent: Optional[QWidget] = None):
+        super().__init__(parent)
 
-        # ---------------- NETWORK (gateway) ----------------
-        self.phase.emit("network", "running")
+        self._helper = Helper()
+        self._tools = Tools()
+        self.host = (host or "").strip()
+        self.ports = ports
+        self._parent: Optional[QWidget] = None
 
-        gw = self._tools.gateway()
-        if not gw:
-            self.log.emit("Network: default gateway not found.")
-            self.phase.emit("network", "fail")
-            self.summary.emit(False, False, False)
-            return
+        self._steps: list[DiagnosticStep] = []
+        self._finished_listeners: list[Callable[[bool], None]] = []
 
-        self.log.emit(f"Network: default gateway {gw}")
-        gw_ok = self._tools.ping(gw)
-        self.log.emit("Network: gateway reachable." if gw_ok else "Network: gateway not reachable.")
-        self.phase.emit("network", "ok" if gw_ok else "fail")
-        network_ok = gw_ok
+        # Register the built-in steps using the public API
+        self._register_default_steps()
 
-        # ---------------- INTERNET (public ping + DNS) ----------------
-        self.phase.emit("internet", "running")
+    def add(
+        self,
+        name: str,
+        label: str,
+        icon: Optional[str],
+        func: Callable[[Callable[[str], None]], bool]
+    ) -> None:
+        self._steps.append(DiagnosticStep(name, label, icon, func))
 
-        # Public IP check via ping (8.8.8.8)
-        pub_ok = self._tools.ping("8.8.8.8")
-        self.log.emit(
-            "Internet: 8.8.8.8 reachable."
-            if pub_ok else
-            "Internet: cannot reach 8.8.8.8."
-        )
+    def on_finish(self, fn: Callable[[bool], None]) -> None:
+        """
+        Register a listener to be called when the diagnostic run finishes.
 
-        # DNS test via Tools.nslookup
-        IPs = self._tools.nslookup("google.com")
-        dns_ok = bool(IPs)
-        if dns_ok:
-            self.log.emit(f"Internet: DNS OK → {IPs}")
-        else:
-            self.log.emit(f"Internet: DNS failed: {IPs or 'no valid addresses found.'}")
-
-        internet_ok = pub_ok and dns_ok
-        self.phase.emit("internet", "ok" if internet_ok else "fail")
-
-        # ---------------- SERVICE (resolve + ping + port(s)) ----------------
-        self.phase.emit("service", "running")
-        svc_ok = False
-
-        if not self.host:
-            self.log.emit("Service: no host configured.")
-        else:
-            res_ok, addr = self._resolve_host(self.host)
-            if not res_ok:
-                self.log.emit(f"Service: cannot resolve {self.host}: {addr}")
-            else:
-                self.log.emit(f"Service: target {self.host} -> {addr} (ports: {self.ports})")
-
-                # Run any registered pre-service steps (e.g., VPN bring-up)
-                for step in list(self._before_service_steps):
-                    try:
-                        res = step(self)
-                    except Exception as e:
-                        self.log.emit(
-                            f"Service: pre-service step "
-                            f"{getattr(step, '__name__', repr(step))} raised {e!r}."
-                        )
-                        res = None
-
-                    # If a step explicitly returns False, abort service diagnostics
-                    if res is False:
-                        self.log.emit("Service: aborted by pre-service step.")
-                        self.phase.emit("service", "fail")
-                        self.summary.emit(network_ok, internet_ok, False)
-                        return
-
-                p_ok = self._tools.ping(addr)
-                self.log.emit(
-                    "Service: ping reachable."
-                    if p_ok else
-                    "Service: ping failed."
-                )
-
-                # Port test using Tools.nmap (with TCP fallback inside nmap())
-                port_results = self._tools.nmap(addr, self.ports)
-                if not port_results:
-                    self.log.emit("Service: no ports tested or scan failed.")
-                    t_ok = False
-                else:
-                    # Log each port
-                    open_any = False
-                    for p, is_open in port_results.items():
-                        self.log.emit(
-                            f"Service: port {p} {'open' if is_open else 'closed'}."
-                        )
-                        if is_open:
-                            open_any = True
-                    t_ok = open_any
-
-                svc_ok = p_ok and t_ok
-
-        self.phase.emit("service", "ok" if svc_ok else "fail")
-
-        # ---------------- SUMMARY ----------------
-        self.summary.emit(network_ok, internet_ok, svc_ok)
-
-    # ------------------------------------------------------------------
-    # UI dialog helper
-    # ------------------------------------------------------------------
+        The listener will receive a single bool argument indicating overall success.
+        """
+        if callable(fn):
+            self._finished_listeners.append(fn)
 
     def show(
         self,
         parent: Optional[QWidget] = None,
-        before: Optional[Iterable[Callable[["Diagnostic"], bool | None]]] = None,
         finished: Optional[Callable[[bool], None]] = None,
-    ):
+    ) -> QDialog:
         if parent is not None and isinstance(parent, QWidget):
             self._parent = parent
 
-        dlg = DiagnosticDialog(
-            self.host,
-            self.ports,
-            parent=self._parent,
-            before=before,
-        )
+        dlg = DiagnosticDialog(self._steps, parent=self._parent)
+
+        for fn in self._finished_listeners:
+            dlg.finished.connect(fn)
 
         if finished is not None:
             dlg.finished.connect(finished)
@@ -229,41 +116,14 @@ class Diagnostic(QThread):
         dlg.activateWindow()
         return dlg
 
-    # ------------------------------------------------------------------
-    # Pre-service step registration
-    # ------------------------------------------------------------------
-
-    def add(self, fn: Callable[["Diagnostic"], bool | None]) -> None:
-        """
-        Register a callback to run just before the service ping/port checks.
-
-        The callback will receive this Diagnostic instance as argument and can
-        emit logs via self.log.emit(...).
-
-        If the callback returns False explicitly, the service phase will be
-        marked as failed and the diagnostic will stop before pinging/port checks.
-        Any other return value (or no return) is treated as non-fatal.
-        """
-        if callable(fn):
-            self._before_service_steps.append(fn)
-
 class DiagnosticDialog(QDialog):
     finished = pyqtSignal(bool)
 
-    def __init__(
-        self,
-        host: str,
-        ports: Any,
-        parent: Optional[QWidget] = None,
-        before: Optional[Iterable[Callable[["Diagnostic"], bool | None]]] = None,
-    ):
+    def __init__(self, steps: Iterable[DiagnosticStep], parent: Optional[QWidget] = None):
         super().__init__(parent)
 
-        self._host = host or ""
-        self._ports = ports
         self._helper = Helper()
-        self._tools = Tools()
-        self._before_service_steps: list[Callable[["Diagnostic"], bool | None]] = list(before or [])
+        self._steps = list(steps)
 
         self.setWindowTitle("Diagnostic")
         self.setObjectName("DiagnosticDialog")
@@ -275,129 +135,96 @@ class DiagnosticDialog(QDialog):
         )
         self.setMinimumSize(700, 420)
 
-        # --- top: horizontal stepper
-        self.dev_ind = StepIndicator("Device")
-        self.net_ind = StepIndicator("Network")
-        self.int_ind = StepIndicator("Internet")
-        self.svc_ind = StepIndicator("Service")
+        icons_path = self._helper.get_path("icons")
+        circle_path = self._helper.join(icons_path, "circle.svg")
+        spinner_path = self._helper.join(icons_path, "spinner.svg")
+        error_path = self._helper.join(icons_path, "error.svg")
+        success_path = self._helper.join(icons_path, "success.svg")
 
-        stepper = QHBoxLayout()
-        stepper.setSpacing(24)
-        stepper.setContentsMargins(16, 16, 16, 8)
-        for w in (self.dev_ind, self.net_ind, self.int_ind, self.svc_ind):
-            stepper.addWidget(w, 1)
+        self._status_icons = {
+            "idle": QIcon(circle_path).pixmap(24, 24),
+            "running": QIcon(spinner_path).pixmap(24, 24),
+            "fail": QIcon(error_path).pixmap(24, 24),
+            "ok": QIcon(success_path).pixmap(24, 24),
+            "success": QIcon(success_path).pixmap(24, 24),
+            "error": QIcon(error_path).pixmap(24, 24),
+        }
 
-        # --- right: “Your network status”
-        self.status_panel = QLabel()
-        self.status_panel.setTextFormat(Qt.PlainText)
-        self.status_panel.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.status_panel.setMinimumWidth(260)
-        self.status_panel.setStyleSheet(
-            "QLabel { "
-            "background: rgba(255,255,255,.06); "
-            "padding:12px; "
-            "border:1px solid rgba(0,0,0,.15); "
-            "border-radius:8px; "
-            "}"
-        )
+        self._step_icon_labels: dict[str, QLabel] = {}
 
-        # --- left: log
+        top_layout = QHBoxLayout()
+        top_layout.setSpacing(24)
+        top_layout.setContentsMargins(16, 16, 16, 8)
+
+        for step in self._steps:
+            icon_label = QLabel()
+            icon_label.setPixmap(self._status_icons["idle"])
+            icon_label.setFixedSize(24, 24)
+            text_label = QLabel(step.label)
+            text_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+            step_layout = QHBoxLayout()
+            step_layout.setSpacing(8)
+            step_layout.addWidget(icon_label)
+            step_layout.addWidget(text_label)
+            step_layout.addStretch(1)
+
+            container = QWidget()
+            container.setLayout(step_layout)
+            top_layout.addWidget(container, 1)
+
+            self._step_icon_labels[step.name] = icon_label
+
         self.log = QTextEdit()
         self.log.setReadOnly(True)
 
-        mid = QHBoxLayout()
-        mid.setContentsMargins(16, 0, 16, 0)
-        mid.setSpacing(16)
-        mid.addWidget(self.log, 2)
-        mid.addWidget(self.status_panel, 1)
-
-        # --- bottom: buttons
+        btns = QHBoxLayout()
+        btns.setContentsMargins(16, 8, 16, 16)
         self.run_btn = QPushButton("Run Diagnostics")
         self.close_btn = QPushButton("Close")
         self.run_btn.clicked.connect(self.start_diagnostic)
         self.close_btn.clicked.connect(self.close)
-
-        btns = QHBoxLayout()
-        btns.setContentsMargins(16, 8, 16, 16)
         btns.addStretch(1)
         btns.addWidget(self.run_btn)
         btns.addWidget(self.close_btn)
 
-        # --- root layout
         root = QVBoxLayout(self)
-        root.addLayout(stepper)
-        root.addLayout(mid)
+        root.addLayout(top_layout)
+        root.addWidget(self.log)
         root.addLayout(btns)
 
-        self._update_status_panel("Unknown", "Unknown", "Unknown")
-
-        # thread handle
-        self._thr: Diagnostic | None = None
-
-    # -------------------------------------------------
-    # UI helpers
-    # -------------------------------------------------
-
-    def _update_status_panel(self, network: str, internet: str, service: str):
-        lines = [
-            "Your network status:",
-            f"Network:  {network}",
-            f"Internet: {internet}",
-            f"Service:  {service}",
-        ]
-        self.status_panel.setText("\n".join(lines))
-
-    def _set_all(self, state: str = "idle"):
-        self.dev_ind.set_state(state)
-        self.net_ind.set_state(state)
-        self.int_ind.set_state(state)
-        self.svc_ind.set_state(state)
-
-    # -------------------------------------------------
-    # Start diagnostics
-    # -------------------------------------------------
+        self._thr: Optional[DiagnosticThread] = None
 
     def start_diagnostic(self):
         self.log.clear()
-        self._set_all("idle")
+        for label in self._step_icon_labels.values():
+            label.setPixmap(self._status_icons["idle"])
         self.run_btn.setEnabled(False)
 
-        # If host not provided, try to guess from tools (e.g. gateway or first IP)
-        host = self._host
-        ports = self._ports
-
-        self._thr = Diagnostic(host=host, ports=ports, parent=self)
-
-        # Propagate any pre-service steps down to the worker thread
-        for step in self._before_service_steps:
-            self._thr.add(step)
-
+        self._thr = DiagnosticThread(self._steps, parent=self)
         self._thr.log.connect(self._on_log)
-        self._thr.phase.connect(self._on_phase)       # phase, state
-        self._thr.summary.connect(self._on_summary)   # network, internet, service
-        self._thr.finished.connect(lambda: self.run_btn.setEnabled(True))
+        self._thr.step_state.connect(self._on_step_state)
+        self._thr.finished.connect(self._on_finished)
+        self._thr.finished.connect(lambda _: self.run_btn.setEnabled(True))
         self._thr.start()
 
-    # -------------------------------------------------
-    # Slots for worker signals
-    # -------------------------------------------------
-
-    def _on_log(self, s: str):
+    def _on_log(self, s: str) -> None:
         self.log.append(s)
 
-    def _on_phase(self, phase: str, state: str):
-        mapping = {
-            "device": self.dev_ind,
-            "network": self.net_ind,
-            "internet": self.int_ind,
-            "service": self.svc_ind,
-        }
-        if phase in mapping:
-            mapping[phase].set_state(state)
+    def _on_step_state(self, name: str, state: str) -> None:
+        label = self._step_icon_labels.get(name)
+        if not label:
+            return
+        if state == "running":
+            pix = self._status_icons["running"]
+        elif state == "ok":
+            pix = self._status_icons["success"]
+        elif state == "fail":
+            pix = self._status_icons["error"]
+        else:
+            pix = self._status_icons["idle"]
+        label.setPixmap(pix)
 
-    def _on_summary(self, network: bool, internet: bool, service: bool):
-        def t(b: bool) -> str:
-            return "Connected" if b else "Not connected"
-
-        self._update_status_panel(t(network), t(internet), t(service))
-        self.finished.emit(service)
+    def _on_finished(self, results: dict) -> None:
+        success = all(bool(v) for v in results.values()) if results else False
+        self.finished.emit(success)
