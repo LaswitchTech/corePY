@@ -78,9 +78,12 @@ class Tools:
         rc, out = self._helper.run(args)
         if rc != 0:
             return False, ""
-        m = re.search(r"Address:\s+([0-9.]+)", out)
+
+        # Look for "Address: x.x.x.x" without "#" (which indicates a non-IPv4 address)
+        m = re.search(r"Address:\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?!\s*#)", out)
         if m:
             return True, m.group(1)
+
         return False, ""
 
     def gateway(self):
