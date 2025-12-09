@@ -139,12 +139,12 @@ class DiagnosticDialog(QDialog):
         success_path = self._helper.join(icons_path, "success.svg")
 
         self._status_icons = {
-            "idle": QIcon(circle_path).pixmap(24, 24),
-            "running": QIcon(spinner_path).pixmap(24, 24),
-            "fail": QIcon(error_path).pixmap(24, 24),
-            "ok": QIcon(success_path).pixmap(24, 24),
-            "success": QIcon(success_path).pixmap(24, 24),
-            "error": QIcon(error_path).pixmap(24, 24),
+            "idle": QIcon(circle_path).pixmap(48, 48),
+            "running": QIcon(spinner_path).pixmap(48, 48),
+            "fail": QIcon(error_path).pixmap(48, 48),
+            "ok": QIcon(success_path).pixmap(48, 48),
+            "success": QIcon(success_path).pixmap(48, 48),
+            "error": QIcon(error_path).pixmap(48, 48),
         }
 
         self._step_icon_labels: dict[str, QLabel] = {}
@@ -156,14 +156,16 @@ class DiagnosticDialog(QDialog):
         for step in self._steps:
             icon_label = QLabel()
             icon_label.setPixmap(self._status_icons["idle"])
-            icon_label.setFixedSize(24, 24)
-            text_label = QLabel(step.label)
-            text_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            icon_label.setFixedSize(48, 48)
+            icon_label.setAlignment(Qt.AlignCenter)
 
-            step_layout = QHBoxLayout()
-            step_layout.setSpacing(8)
-            step_layout.addWidget(icon_label)
-            step_layout.addWidget(text_label)
+            text_label = QLabel(step.label)
+            text_label.setAlignment(Qt.AlignCenter)
+
+            step_layout = QVBoxLayout()
+            step_layout.setSpacing(4)
+            step_layout.addWidget(icon_label, alignment=Qt.AlignCenter)
+            step_layout.addWidget(text_label, alignment=Qt.AlignCenter)
             step_layout.addStretch(1)
 
             container = QWidget()
