@@ -90,7 +90,7 @@ class Log:
         # Check if verbose logging is enabled and print to console
         if self._configuration.get("log.verbose"):
             for ln in lines:
-                print(f"[{channel}] {ln}")
+                print(f"[{channel}][{level.upper()}][{self._helper.get_now()}] {ln}")
 
         # Append lines to the buffer
         with self._lock:
