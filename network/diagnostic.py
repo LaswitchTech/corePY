@@ -132,7 +132,7 @@ class DiagnosticDialog(QDialog):
         )
         self.setMinimumSize(700, 420)
 
-        icons_path = self._helper.get_path("icons")
+        icons_path = self._helper.get_path("core/icons")
         circle_path = self._helper.join(icons_path, "circle.svg")
         spinner_path = self._helper.join(icons_path, "spinner.svg")
         error_path = self._helper.join(icons_path, "error.svg")
