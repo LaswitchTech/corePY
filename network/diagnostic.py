@@ -3,21 +3,31 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Iterable
+from typing import Any, Callable, Optional, Iterable, TYPE_CHECKING
 
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QObject
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTextEdit, QWidget
+    QLabel, QPushButton, QTextEdit, QWidget,
+    QApplication
 )
 from PyQt5.QtGui import QPixmap, QIcon
 
 try:
     from core.helper import Helper
+    from core.log import Log
 except ImportError:
     from helper import Helper
+    from log import Log
 
 from .tools import Tools
+
+if TYPE_CHECKING:
+    # For type hints only, avoids circular import at runtime
+    try:
+        from core.application import Application
+    except ImportError:
+        from application import Application
 
 class DiagnosticStep:
     def __init__(
@@ -38,38 +48,61 @@ class DiagnosticThread(QThread):
     finished = pyqtSignal(dict)        # {step_name: bool}
 
     def __init__(self, steps: Iterable[DiagnosticStep], parent: Optional[QWidget] = None):
+        app = QApplication.instance()
+        if app is not None and hasattr(app, "logger"):
+            self._logger = app.logger
+        else:
+            self._logger = Log()
+        self._logger.append(f"[DiagnosticThread] Initializing with {len(list(steps))} steps", channel="diagnostic", level="debug")
         super().__init__(parent)
         self._steps = list(steps)
 
     def run(self):
+        self._logger.append(f"[DiagnosticThread] run() started with {len(self._steps)} steps", channel="diagnostic", level="debug")
         results = {}
+
+        step_names = [step.name for step in self._steps]
+        self._logger.append(f"[DiagnosticThread] Steps to run: {step_names}", channel="diagnostic", level="debug")
 
         def printer(msg: str) -> None:
             self.log.emit(msg)
 
         for step in self._steps:
+            self._logger.append(f"[DiagnosticThread] Starting step {step.name}", channel="diagnostic", level="debug")
             self.step_state.emit(step.name, "running")
             try:
                 res = step.func(printer)
                 ok = bool(res)
+                self._logger.append(f"[DiagnosticThread] Step {step.name} returned {ok}", channel="diagnostic", level="debug")
             except Exception as e:
                 printer(f"[{step.label}] error: {e!r}")
+                self._logger.append(f"[DiagnosticThread] Step {step.name} raised exception: {e!r}", channel="diagnostic", level="error")
                 ok = False
 
             results[step.name] = ok
             self.step_state.emit(step.name, "ok" if ok else "fail")
 
         self.finished.emit(results)
+        self._logger.append(f"[DiagnosticThread] run() completed with results: {results}", channel="diagnostic", level="debug")
 
 class Diagnostic(QObject):
     def __init__(self, host: str, ports: Any, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
+        # Retrieve the application instance
+        self._app: Application = QApplication.instance()
+
+        # Ensure Client is created after Application
+        if self._app is None:
+            raise RuntimeError("Client must be created after QApplication/Application.")
+
+        self._logger = self._app.logger or Log()
         self._helper = Helper()
         self._tools = Tools()
         self.host = (host or "").strip()
         self.ports = ports
         self._parent: Optional[QWidget] = None
+        self._logger.append(f"[Diagnostic] Initialized with host={self.host!r}, ports={self.ports!r}", channel="diagnostic", level="debug")
 
         self._steps: list[DiagnosticStep] = []
         self._finished_listeners: list[Callable[[bool], None]] = []
@@ -82,6 +115,7 @@ class Diagnostic(QObject):
         func: Callable[[Callable[[str], None]], bool]
     ) -> None:
         self._steps.append(DiagnosticStep(name, label, icon, func))
+        self._logger.append(f"[Diagnostic] Added step: name={name}, label={label}, icon_provided={icon is not None}", channel="diagnostic", level="debug")
 
     def on_finish(self, fn: Callable[[bool], None]) -> None:
         """
@@ -91,16 +125,19 @@ class Diagnostic(QObject):
         """
         if callable(fn):
             self._finished_listeners.append(fn)
+            self._logger.append(f"[Diagnostic] Added finished listener: {fn!r}", channel="diagnostic", level="debug")
 
     def show(
         self,
         parent: Optional[QWidget] = None,
         finished: Optional[Callable[[bool], None]] = None,
     ) -> QDialog:
+        self._logger.append(f"[Diagnostic] show() called with parent type: {type(parent)}", channel="diagnostic", level="debug")
         if parent is not None and isinstance(parent, QWidget):
             self._parent = parent
 
         dlg = DiagnosticDialog(self._steps, parent=self._parent)
+        self._logger.append(f"[Diagnostic] DiagnosticDialog created with {len(self._steps)} steps", channel="diagnostic", level="debug")
 
         for fn in self._finished_listeners:
             dlg.finished.connect(fn)
@@ -108,7 +145,9 @@ class Diagnostic(QObject):
         if finished is not None:
             dlg.finished.connect(finished)
 
+        self._logger.append("[Diagnostic] Diagnostics dialog about to be executed modally", channel="diagnostic", level="debug")
         dlg.exec_()
+        self._logger.append("[Diagnostic] Diagnostics dialog returned from exec_", channel="diagnostic", level="debug")
         dlg.raise_()
         dlg.activateWindow()
         return dlg
@@ -117,10 +156,17 @@ class DiagnosticDialog(QDialog):
     finished = pyqtSignal(bool)
 
     def __init__(self, steps: Iterable[DiagnosticStep], parent: Optional[QWidget] = None):
+        app = QApplication.instance()
+        if app is not None and hasattr(app, "logger"):
+            self._logger = app.logger
+        else:
+            self._logger = Log()
+
         super().__init__(parent)
 
         self._helper = Helper()
         self._steps = list(steps)
+        self._logger.append(f"[DiagnosticDialog] Initialized with steps: {[step.name for step in self._steps]} (count={len(self._steps)})", channel="diagnostic", level="debug")
 
         self.setWindowTitle("Diagnostic")
         self.setObjectName("DiagnosticDialog")
@@ -195,6 +241,7 @@ class DiagnosticDialog(QDialog):
         self._thr: Optional[DiagnosticThread] = None
 
     def start_diagnostic(self):
+        self._logger.append(f"[DiagnosticDialog] Starting diagnostics with {len(self._steps)} steps...", channel="diagnostic", level="debug")
         self.log.clear()
         for label in self._step_icon_labels.values():
             label.setPixmap(self._status_icons["idle"])
@@ -206,11 +253,14 @@ class DiagnosticDialog(QDialog):
         self._thr.finished.connect(self._on_finished)
         self._thr.finished.connect(lambda _: self.run_btn.setEnabled(True))
         self._thr.start()
+        self._logger.append("[DiagnosticDialog] DiagnosticThread created and started", channel="diagnostic", level="debug")
 
     def _on_log(self, s: str) -> None:
+        self._logger.append(s, channel="diagnostic", level="debug")
         self.log.append(s)
 
     def _on_step_state(self, name: str, state: str) -> None:
+        self._logger.append(f"[DiagnosticDialog] Step {name} state changed to {state}", channel="diagnostic", level="debug")
         label = self._step_icon_labels.get(name)
         if not label:
             return
@@ -226,4 +276,5 @@ class DiagnosticDialog(QDialog):
 
     def _on_finished(self, results: dict) -> None:
         success = all(bool(v) for v in results.values()) if results else False
+        self._logger.append(f"[DiagnosticDialog] Diagnostics finished with results: {results}, success={success}", channel="diagnostic", level="debug")
         self.finished.emit(success)
