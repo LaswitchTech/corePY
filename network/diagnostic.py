@@ -227,13 +227,14 @@ class DiagnosticDialog(QDialog):
         btns.setContentsMargins(16, 8, 16, 16)
         self.run_btn = QPushButton("Run Diagnostics")
         self.run_btn.clicked.connect(self.start_diagnostic)
-        if self._logger is not None:
-            self.log_btn = QPushButton("Open Log")
-            self.log_btn.clicked.connect(self._logger.show)
         self.close_btn = QPushButton("Close")
         self.close_btn.clicked.connect(self.close)
         btns.addStretch(1)
         btns.addWidget(self.run_btn)
+        if self._logger is not None:
+            self.log_btn = QPushButton("Open Log")
+            self.log_btn.clicked.connect(self._logger.show)
+            btns.addWidget(self.log_btn)
         btns.addWidget(self.close_btn)
 
         root = QVBoxLayout(self)
