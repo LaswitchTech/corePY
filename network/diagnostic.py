@@ -74,9 +74,6 @@ class Diagnostic(QObject):
         self._steps: list[DiagnosticStep] = []
         self._finished_listeners: list[Callable[[bool], None]] = []
 
-        # Register the built-in steps using the public API
-        self._register_default_steps()
-
     def add(
         self,
         name: str,
