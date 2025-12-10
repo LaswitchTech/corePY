@@ -295,6 +295,11 @@ class DiagnosticDialog(QDialog):
             return
 
         # If this is a SpinningIconLabel, handle animation + final icons
+        self._logger.append(
+            f"label is instance of {type(label).__name__}",
+            channel="diagnostic",
+            level="debug",
+        )
         if isinstance(label, SpinningIconLabel):
             if state == "running":
                 # Start the spinner animation
