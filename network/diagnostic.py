@@ -202,26 +202,15 @@ class DiagnosticDialog(QDialog):
         top_layout.setContentsMargins(16, 16, 16, 8)
 
         for step in self._steps:
-            # Decide whether this step should use the animated spinner.
-            # Be tolerant: allow "spinner", "spinner.svg", or any icon string containing "spinner".
-            use_spinner = False
-            if isinstance(step.icon, str) and "spinner" in step.icon:
-                use_spinner = True
+            icon_label = SpinningIconLabel(spinner_path, size=32)
+            icon_label.setStyleSheet("padding: 0px; margin: 0px; border: none;")
+            icon_label.setFixedSize(32, 32)
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setScaledContents(True)
 
-            if use_spinner:
-                self._logger.append(
-                    f"[DiagnosticDialog] Using SpinningIconLabel for step '{step.name}' (icon={step.icon!r})",
-                    channel="diagnostic",
-                    level="debug",
-                )
-                icon_label = SpinningIconLabel(spinner_path, size=32)
-            else:
-                icon_label = QLabel()
-                icon_label.setStyleSheet("padding: 0px; margin: 0px; border: none;")
-                icon_label.setPixmap(self._status_icons["idle"])
-                icon_label.setFixedSize(32, 32)
-                icon_label.setAlignment(Qt.AlignCenter)
-                icon_label.setScaledContents(True)
+            # initial state = idle (static)
+            icon_label.setPixmap(self._status_icons["idle"])
+            icon_label.stop()  # make sure timer isn't running
 
             text_label = QLabel(step.label)
             text_label.setAlignment(Qt.AlignCenter)
@@ -265,11 +254,12 @@ class DiagnosticDialog(QDialog):
     def start_diagnostic(self):
         self._logger.append(f"[DiagnosticDialog] Starting diagnostics with {len(self._steps)} steps...", channel="diagnostic", level="debug")
         self.log.clear()
+
         for label in self._step_icon_labels.values():
-            # Reset all icons to idle; stop animation for spinners
             if isinstance(label, SpinningIconLabel):
                 label.stop()
             label.setPixmap(self._status_icons["idle"])
+
         self.run_btn.setEnabled(False)
 
         self._thr = DiagnosticThread(self._steps, parent=self)
@@ -290,42 +280,49 @@ class DiagnosticDialog(QDialog):
             channel="diagnostic",
             level="debug",
         )
+
         label = self._step_icon_labels.get(name)
         if not label:
             return
 
-        # If this is a SpinningIconLabel, handle animation + final icons
-        self._logger.append(
-            f"label is instance of {type(label).__name__}",
-            channel="diagnostic",
-            level="debug",
-        )
+        # We only created SpinningIconLabel instances, but be defensive:
         if isinstance(label, SpinningIconLabel):
-            if state == "running":
-                # Start the spinner animation
-                label.start()
-            else:
-                # Stop animation and show the appropriate static icon
+            if state == "idle":
+                # QLabel behavior (static idle icon)
                 label.stop()
-                if state == "ok":
-                    label.setPixmap(self._status_icons["success"])
-                elif state == "fail":
-                    label.setPixmap(self._status_icons["error"])
-                else:
-                    label.setPixmap(self._status_icons["idle"])
+                label.setPixmap(self._status_icons["idle"])
+
+            elif state == "running":
+                # SpinningIconLabel behavior (spinner icon + animation)
+                label.setPixmap(self._status_icons["running"])
+                label.start()
+
+            elif state == "ok":
+                # QLabel behavior (static success icon)
+                label.stop()
+                label.setPixmap(self._status_icons["ok"])
+
+            elif state == "fail":
+                # QLabel behavior (static error icon)
+                label.stop()
+                label.setPixmap(self._status_icons["fail"])
+
+            else:
+                # Unknown state -> default back to idle, no animation
+                self._logger.append(
+                    f"[DiagnosticDialog] Unknown state '{state}' for step '{name}', defaulting to idle",
+                    channel="diagnostic",
+                    level="warning",
+                )
+                label.stop()
+                label.setPixmap(self._status_icons["idle"])
+
             return
 
-        # Fallback for normal QLabel-based icons
+        # Fallback for plain QLabel (just in case)
         pix = self._status_icons.get(state)
         if pix is not None:
             label.setPixmap(pix)
-        else:
-            # Unknown state; log and leave as-is
-            self._logger.append(
-                f"[DiagnosticDialog] Unknown state '{state}' for step '{name}'",
-                channel="diagnostic",
-                level="warning",
-            )
 
     def _on_finished(self, results: dict) -> None:
         success = all(bool(v) for v in results.values()) if results else False
