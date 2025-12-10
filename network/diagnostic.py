@@ -16,9 +16,11 @@ from PyQt5.QtGui import QPixmap, QIcon
 try:
     from core.helper import Helper
     from core.log import Log
+    from core.ui import SpinningIconLabel
 except ImportError:
     from helper import Helper
     from log import Log
+    from ui import SpinningIconLabel
 
 from .tools import Tools
 
@@ -185,12 +187,12 @@ class DiagnosticDialog(QDialog):
         success_path = self._helper.join(icons_path, "success.svg")
 
         self._status_icons = {
-            "idle": QIcon(circle_path).pixmap(48, 48),
-            "running": QIcon(spinner_path).pixmap(48, 48),
-            "fail": QIcon(error_path).pixmap(48, 48),
-            "ok": QIcon(success_path).pixmap(48, 48),
-            "success": QIcon(success_path).pixmap(48, 48),
-            "error": QIcon(error_path).pixmap(48, 48),
+            "idle": QIcon(circle_path).pixmap(32, 32),
+            "running": QIcon(spinner_path).pixmap(32, 32),
+            "fail": QIcon(error_path).pixmap(32, 32),
+            "ok": QIcon(success_path).pixmap(32, 32),
+            "success": QIcon(success_path).pixmap(32, 32),
+            "error": QIcon(error_path).pixmap(32, 32),
         }
 
         self._step_icon_labels: dict[str, QLabel] = {}
@@ -200,14 +202,15 @@ class DiagnosticDialog(QDialog):
         top_layout.setContentsMargins(16, 16, 16, 8)
 
         for step in self._steps:
-            icon_label = QLabel()
-            # Avoid style-sheet padding/margins clipping the pixmap
-            icon_label.setStyleSheet("padding: 0px; margin: 0px; border: none;")
-            icon_label.setPixmap(self._status_icons["idle"])
-            icon_label.setFixedSize(48, 48)
-            icon_label.setAlignment(Qt.AlignCenter)
-            # Ensure the full SVG (including outer circle) is scaled into the label rect
-            icon_label.setScaledContents(True)
+            if step.icon == "spinner":
+                icon_label = SpinningIconLabel(spinner_path, size=32)
+            else:
+                icon_label = QLabel()
+                icon_label.setStyleSheet("padding: 0px; margin: 0px; border: none;")
+                icon_label.setPixmap(self._status_icons["idle"])
+                icon_label.setFixedSize(32, 32)
+                icon_label.setAlignment(Qt.AlignCenter)
+                icon_label.setScaledContents(True)
 
             text_label = QLabel(step.label)
             text_label.setAlignment(Qt.AlignCenter)
@@ -272,15 +275,21 @@ class DiagnosticDialog(QDialog):
         label = self._step_icon_labels.get(name)
         if not label:
             return
-        if state == "running":
-            pix = self._status_icons["running"]
-        elif state == "ok":
-            pix = self._status_icons["success"]
-        elif state == "fail":
-            pix = self._status_icons["error"]
-        else:
-            pix = self._status_icons["idle"]
-        label.setPixmap(pix)
+
+        # If this is a SpinningIconLabel, handle animation
+        if isinstance(label, SpinningIconLabel):
+            if state == "running":
+                label.start()
+            else:
+                label.stop()
+                # show static icon for success or fail
+                if state == "ok":
+                    label.setPixmap(self._status_icons["success"])
+                elif state == "fail":
+                    label.setPixmap(self._status_icons["error"])
+                else:
+                    label.setPixmap(self._status_icons["idle"])
+            return
 
     def _on_finished(self, results: dict) -> None:
         success = all(bool(v) for v in results.values()) if results else False
