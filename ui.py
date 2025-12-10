@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # src/app/ui.py
 
+from __future__ import annotations
+
 import os
 import base64
-
-from __future__ import annotations
 
 from typing import Iterable, Optional, Callable, List
 
