@@ -31,8 +31,6 @@ class Helper:
 
         self.home_dir = os.path.expanduser("~")
 
-    # ---------- OS / paths ----------
-
     def get_path(self, rel_path: str) -> str | None:
         rel = rel_path.replace("\\", "/")
 
@@ -114,6 +112,11 @@ class Helper:
         screen = app.primaryScreen()
         size = screen.size()
         return (size.width(), size.height())
+
+    @staticmethod
+    def get_now() -> str:
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def file_exists(path: str | None) -> bool:

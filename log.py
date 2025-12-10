@@ -87,10 +87,14 @@ class Log:
         # Normalize to individual lines
         lines = message.splitlines() or [message]
 
-        # Check if verbose logging is enabled and print to console
-        if self._configuration.get("log.verbose"):
-            for ln in lines:
-                print(f"[{channel}] {ln}")
+        # Format each line with timestamp, level, channel
+        for ln in lines:
+            line = f"[{self._helper.get_now()}][{level.upper()}][{channel}] {ln}"
+            lines[lines.index(ln)] = line
+
+            # Check if verbose logging is enabled and print to console
+            if self._configuration.get("log.verbose"):
+                print(line)
 
         # Append lines to the buffer
         with self._lock:

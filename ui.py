@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-# src/app/ui.py
+# src/core/ui.py
+
 from __future__ import annotations
+
+import os
+import base64
 
 from typing import Iterable, Optional, Callable, List
 
@@ -11,13 +15,10 @@ from PyQt5.QtWidgets import (
     QListView, QFrame, QApplication, QListWidget
 )
 from PyQt5.QtGui import (
-    QIcon, QPixmap, QPainter, QColor, QPen
+    QIcon, QPixmap, QPainter, QColor, QPen, QTransform
 )
-from PyQt5.QtCore import QRect, Qt
+from PyQt5.QtCore import QRect, Qt, QTimer
 from PyQt5.QtSvg import QSvgWidget, QSvgRenderer
-
-import os
-import base64
 
 # Allow this module to be used both as part of the 'app' package and as a standalone script
 try:
@@ -169,6 +170,48 @@ class MsgBox(QDialog):
         )
         dlg.exec_()
         return dlg._selected or default or ""
+
+class SpinningIconLabel(QLabel):
+
+    def __init__(self, svg_path: str, size: int = 32, interval_ms: int = 50, parent=None):
+        super().__init__(parent)
+        self._size = size
+        self._svg_path = svg_path
+        self._angle = 0
+
+        self._base_pixmap = QIcon(svg_path).pixmap(size, size)
+
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignCenter)
+        self.setScaledContents(True)
+        self.setStyleSheet("padding: 0; margin: 0; border: none;")
+
+        # Timer
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(interval_ms)
+
+    def _tick(self):
+        """Rotate icon by a fixed number of degrees."""
+        self._angle = (self._angle + 10) % 360
+
+        rotated = self._rotate_pixmap(self._base_pixmap, self._angle)
+        self.setPixmap(rotated)
+
+    def _rotate_pixmap(self, pixmap: QPixmap, angle: float) -> QPixmap:
+        """Return a rotated copy of the pixmap."""
+        transform = QTransform()
+        transform.rotate(angle)
+        rotated = pixmap.transformed(transform, Qt.SmoothTransformation)
+
+        # Scale back to exact size
+        return rotated.scaled(self._size, self._size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def stop(self):
+        self._timer.stop()
+
+    def start(self):
+        self._timer.start()
 
 class ColorButton(QPushButton):
     def __init__(self, initial: str = "#265162", parent=None):

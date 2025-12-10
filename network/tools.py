@@ -70,18 +70,51 @@ class Tools:
         return hops
 
     def nslookup(self, host):
-        args = []
+        """
+        Perform a DNS lookup for `host`.
+
+        Returns:
+            - list[str]: All resolved IPv4 addresses (unique, in order of appearance),
+                         excluding the DNS server IP (e.g. 127.0.0.53#53 after "Server:").
+            - False: If the lookup failed or no valid addresses were found.
+        """
+        # Build command
         if self._os == "windows":
             args = ["nslookup", host]
         else:
             args = [shutil.which("nslookup") or "nslookup", host]
+
         rc, out = self._helper.run(args)
         if rc != 0:
-            return False, ""
-        m = re.search(r"Address:\s+([0-9.]+)", out)
-        if m:
-            return True, m.group(1)
-        return False, ""
+            return False
+
+        ips: List[str] = []
+        prev_line = ""
+
+        # Typical Linux/systemd-resolved output looks like:
+        #   Server:         127.0.0.53
+        #   Address:        127.0.0.53#53
+        #
+        # We want to *skip* that "server" address and only keep the
+        # addresses from the answer section.
+        for line in out.splitlines():
+            stripped = line.strip()
+
+            m = re.search(r"Address:\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", stripped)
+            if m:
+                ip = m.group(1)
+
+                # Skip the resolver/server IP line that immediately follows a "Server:" line
+                if prev_line.strip().lower().startswith("server:"):
+                    prev_line = stripped
+                    continue
+
+                if ip not in ips:
+                    ips.append(ip)
+
+            prev_line = stripped
+
+        return ips if ips else False
 
     def gateway(self):
         # Windows: parse ipconfig output

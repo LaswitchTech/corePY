@@ -3,199 +3,172 @@
 
 from __future__ import annotations
 
-import re
-from typing import Any
+from typing import Any, Callable, Optional, Iterable, TYPE_CHECKING
 
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QObject
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTextEdit, QWidget
+    QLabel, QPushButton, QTextEdit, QWidget,
+    QApplication
 )
+from PyQt5.QtGui import QPixmap, QIcon
 
-from core.helper import Helper
-from core.ui import StepIndicator
+try:
+    from core.helper import Helper
+    from core.log import Log
+    from core.ui import SpinningIconLabel
+except ImportError:
+    from helper import Helper
+    from log import Log
+    from ui import SpinningIconLabel
+
 from .tools import Tools
 
-class Diagnostic(QThread):
-    log     = pyqtSignal(str)
-    phase   = pyqtSignal(str, str)
-    summary = pyqtSignal(bool, bool, bool)
+if TYPE_CHECKING:
+    # For type hints only, avoids circular import at runtime
+    try:
+        from core.application import Application
+    except ImportError:
+        from application import Application
 
-    def __init__(self, host: str, ports: Any, parent=None):
+class DiagnosticStep:
+    def __init__(
+        self,
+        name: str,
+        label: str,
+        icon: Optional[str],
+        func: Callable[[Callable[[str], None]], bool]
+    ):
+        self.name = name
+        self.label = label
+        self.icon = icon
+        self.func = func
 
-        # Initialize QThread
+class DiagnosticThread(QThread):
+    log = pyqtSignal(str)
+    step_state = pyqtSignal(str, str)  # name, state: idle|running|ok|fail
+    finished = pyqtSignal(dict)        # {step_name: bool}
+
+    def __init__(self, steps: Iterable[DiagnosticStep], parent: Optional[QWidget] = None):
+        app = QApplication.instance()
+        if app is not None and hasattr(app, "logger"):
+            self._logger = app.logger
+        else:
+            self._logger = Log()
+        self._logger.append(f"[DiagnosticThread] Initializing with {len(list(steps))} steps", channel="diagnostic", level="debug")
         super().__init__(parent)
-
-        # Initialize Helper and Tools
-        self._helper = Helper()
-        self._tools = Tools()
-
-        # Store host and ports
-        self.host = (host or "").strip()
-        self.ports = ports
-
-        # Parent for dialogs
-        self._parent = None
-
-    # -------------------------------------------------
-    # Small helpers
-    # -------------------------------------------------
-
-    def _is_ip(self, value: str) -> bool:
-        return bool(re.match(r"^\d+\.\d+\.\d+\.\d+$", value.strip()))
-
-    def _resolve_host(self, host: str) -> tuple[bool, str]:
-        """
-        Resolve a host using Tools.nslookup when necessary.
-        Returns (ok, ip_or_error).
-        """
-        if self._is_ip(host):
-            return True, host
-
-        ok, ip = self._tools.nslookup(host)
-        if ok:
-            return True, ip
-        return False, ip or "Resolution failed"
-
-    # -------------------------------------------------
-    # Main run logic (4 phases: device, network, internet, service)
-    # -------------------------------------------------
+        self._steps = list(steps)
 
     def run(self):
-        # ---------------- DEVICE ----------------
-        self.phase.emit("device", "running")
+        self._logger.append(f"[DiagnosticThread] run() started with {len(self._steps)} steps", channel="diagnostic", level="debug")
+        results = {}
 
-        ips = self._tools.ip()
-        if not ips:
-            self.log.emit("Device: could not determine any local IPv4 address.")
-            self.phase.emit("device", "fail")
-            self.summary.emit(False, False, False)
-            return
+        step_names = [step.name for step in self._steps]
+        self._logger.append(f"[DiagnosticThread] Steps to run: {step_names}", channel="diagnostic", level="debug")
 
-        # pick the first non-APIPA, non-loopback IP from Tools.ip()
-        ip = None
-        for cand in ips:
-            if not cand.startswith("127.") and not self._tools.apipa(cand):
-                ip = cand
-                break
+        def printer(msg: str) -> None:
+            self.log.emit(msg)
 
-        if not ip:
-            self.log.emit(f"Device: only APIPA/loopback addresses found: {ips}")
-            self.phase.emit("device", "fail")
-            self.summary.emit(False, False, False)
-            return
+        for step in self._steps:
+            self._logger.append(f"[DiagnosticThread] Starting step {step.name}", channel="diagnostic", level="debug")
+            self.step_state.emit(step.name, "running")
+            try:
+                res = step.func(printer)
+                ok = bool(res)
+                self._logger.append(f"[DiagnosticThread] Step {step.name} returned {ok}", channel="diagnostic", level="debug")
+            except Exception as e:
+                printer(f"[{step.label}] error: {e!r}")
+                self._logger.append(f"[DiagnosticThread] Step {step.name} raised exception: {e!r}", channel="diagnostic", level="error")
+                ok = False
 
-        if self._tools.apipa(ip):
-            self.log.emit(f"Device: APIPA address {ip} (DHCP failure).")
-            self.phase.emit("device", "fail")
-            self.summary.emit(False, False, False)
-            return
+            results[step.name] = ok
+            self.step_state.emit(step.name, "ok" if ok else "fail")
 
-        self.log.emit(f"Device: local IP is {ip}")
-        self.phase.emit("device", "ok")
+        self.finished.emit(results)
+        self._logger.append(f"[DiagnosticThread] run() completed with results: {results}", channel="diagnostic", level="debug")
 
-        # ---------------- NETWORK (gateway) ----------------
-        self.phase.emit("network", "running")
+class Diagnostic(QObject):
+    def __init__(self, host: str, ports: Any, parent: Optional[QWidget] = None):
+        super().__init__(parent)
 
-        gw = self._tools.gateway()
-        if not gw:
-            self.log.emit("Network: default gateway not found.")
-            self.phase.emit("network", "fail")
-            self.summary.emit(False, False, False)
-            return
+        # Retrieve the application instance
+        self._app: Application = QApplication.instance()
 
-        self.log.emit(f"Network: default gateway {gw}")
-        gw_ok = self._tools.ping(gw)
-        self.log.emit("Network: gateway reachable." if gw_ok else "Network: gateway not reachable.")
-        self.phase.emit("network", "ok" if gw_ok else "fail")
-        network_ok = gw_ok
+        # Ensure Client is created after Application
+        if self._app is None:
+            raise RuntimeError("Client must be created after QApplication/Application.")
 
-        # ---------------- INTERNET (public ping + DNS) ----------------
-        self.phase.emit("internet", "running")
+        self._logger = self._app.logger or Log()
+        self._helper = Helper()
+        self._tools = Tools()
+        self.host = (host or "").strip()
+        self.ports = ports
+        self._parent: Optional[QWidget] = None
+        self._logger.append(f"[Diagnostic] Initialized with host={self.host!r}, ports={self.ports!r}", channel="diagnostic", level="debug")
 
-        # Public IP check via ping (8.8.8.8)
-        pub_ok = self._tools.ping("8.8.8.8")
-        self.log.emit(
-            "Internet: 8.8.8.8 reachable."
-            if pub_ok else
-            "Internet: cannot reach 8.8.8.8."
-        )
+        self._steps: list[DiagnosticStep] = []
+        self._finished_listeners: list[Callable[[bool], None]] = []
 
-        # DNS test via Tools.nslookup
-        dns_ok, detail = self._tools.nslookup("google.com")
-        if dns_ok:
-            self.log.emit(f"Internet: DNS OK → {detail}")
-        else:
-            self.log.emit(f"Internet: DNS failed: {detail}")
+    def add(
+        self,
+        name: str,
+        label: str,
+        icon: Optional[str],
+        func: Callable[[Callable[[str], None]], bool]
+    ) -> None:
+        self._steps.append(DiagnosticStep(name, label, icon, func))
+        self._logger.append(f"[Diagnostic] Added step: name={name}, label={label}, icon_provided={icon is not None}", channel="diagnostic", level="debug")
 
-        internet_ok = pub_ok and dns_ok
-        self.phase.emit("internet", "ok" if internet_ok else "fail")
+    def on_finish(self, fn: Callable[[bool], None]) -> None:
+        """
+        Register a listener to be called when the diagnostic run finishes.
 
-        # ---------------- SERVICE (resolve + ping + port(s)) ----------------
-        self.phase.emit("service", "running")
-        svc_ok = False
+        The listener will receive a single bool argument indicating overall success.
+        """
+        if callable(fn):
+            self._finished_listeners.append(fn)
+            self._logger.append(f"[Diagnostic] Added finished listener: {fn!r}", channel="diagnostic", level="debug")
 
-        if not self.host:
-            self.log.emit("Service: no host configured.")
-        else:
-            res_ok, addr = self._resolve_host(self.host)
-            if not res_ok:
-                self.log.emit(f"Service: cannot resolve {self.host}: {addr}")
-            else:
-                self.log.emit(f"Service: target {self.host} -> {addr} (ports: {self.ports})")
-
-                p_ok = self._tools.ping(addr)
-                self.log.emit(
-                    "Service: ping reachable."
-                    if p_ok else
-                    "Service: ping failed."
-                )
-
-                # Port test using Tools.nmap (with TCP fallback inside nmap())
-                port_results = self._tools.nmap(addr, self.ports)
-                if not port_results:
-                    self.log.emit("Service: no ports tested or scan failed.")
-                    t_ok = False
-                else:
-                    # Log each port
-                    open_any = False
-                    for p, is_open in port_results.items():
-                        self.log.emit(
-                            f"Service: port {p} {'open' if is_open else 'closed'}."
-                        )
-                        if is_open:
-                            open_any = True
-                    t_ok = open_any
-
-                svc_ok = p_ok and t_ok
-
-        self.phase.emit("service", "ok" if svc_ok else "fail")
-
-        # ---------------- SUMMARY ----------------
-        self.summary.emit(network_ok, internet_ok, svc_ok)
-
-    # ------------------------------------------------------------------
-    # UI dialog helper
-    # ------------------------------------------------------------------
-
-    def show(self, parent=None):
+    def show(
+        self,
+        parent: Optional[QWidget] = None,
+        finished: Optional[Callable[[bool], None]] = None,
+    ) -> QDialog:
+        self._logger.append(f"[Diagnostic] show() called with parent type: {type(parent)}", channel="diagnostic", level="debug")
         if parent is not None and isinstance(parent, QWidget):
             self._parent = parent
-        dlg = DiagnosticDialog(self.host, self.ports, parent=self._parent)
+
+        dlg = DiagnosticDialog(self._steps, parent=self._parent)
+        self._logger.append(f"[Diagnostic] DiagnosticDialog created with {len(self._steps)} steps", channel="diagnostic", level="debug")
+
+        for fn in self._finished_listeners:
+            dlg.finished.connect(fn)
+
+        if finished is not None:
+            dlg.finished.connect(finished)
+
+        self._logger.append("[Diagnostic] Diagnostics dialog about to be executed modally", channel="diagnostic", level="debug")
         dlg.exec_()
+        self._logger.append("[Diagnostic] Diagnostics dialog returned from exec_", channel="diagnostic", level="debug")
         dlg.raise_()
         dlg.activateWindow()
         return dlg
 
 class DiagnosticDialog(QDialog):
+    finished = pyqtSignal(bool)
 
-    def __init__(self, host: str, ports: Any, parent=None):
+    def __init__(self, steps: Iterable[DiagnosticStep], parent: Optional[QWidget] = None):
+        app = QApplication.instance()
+        if app is not None and hasattr(app, "logger"):
+            self._logger = app.logger
+        else:
+            self._logger = Log()
+
         super().__init__(parent)
 
-        self._host = host or ""
-        self._ports = ports
         self._helper = Helper()
-        self._tools = Tools()
+        self._steps = list(steps)
+        self._logger.append(f"[DiagnosticDialog] Initialized with steps: {[step.name for step in self._steps]} (count={len(self._steps)})", channel="diagnostic", level="debug")
 
         self.setWindowTitle("Diagnostic")
         self.setObjectName("DiagnosticDialog")
@@ -207,123 +180,151 @@ class DiagnosticDialog(QDialog):
         )
         self.setMinimumSize(700, 420)
 
-        # --- top: horizontal stepper
-        self.dev_ind = StepIndicator("Device")
-        self.net_ind = StepIndicator("Network")
-        self.int_ind = StepIndicator("Internet")
-        self.svc_ind = StepIndicator("Service")
+        icons_path = self._helper.get_path("core/icons")
+        circle_path = self._helper.join(icons_path, "circle.svg")
+        spinner_path = self._helper.join(icons_path, "spinner.svg")
+        error_path = self._helper.join(icons_path, "error.svg")
+        success_path = self._helper.join(icons_path, "success.svg")
 
-        stepper = QHBoxLayout()
-        stepper.setSpacing(24)
-        stepper.setContentsMargins(16, 16, 16, 8)
-        for w in (self.dev_ind, self.net_ind, self.int_ind, self.svc_ind):
-            stepper.addWidget(w, 1)
+        self._status_icons = {
+            "idle": QIcon(circle_path).pixmap(32, 32),
+            "running": QIcon(spinner_path).pixmap(32, 32),
+            "fail": QIcon(error_path).pixmap(32, 32),
+            "ok": QIcon(success_path).pixmap(32, 32),
+            "success": QIcon(success_path).pixmap(32, 32),
+            "error": QIcon(error_path).pixmap(32, 32),
+        }
 
-        # --- right: “Your network status”
-        self.status_panel = QLabel()
-        self.status_panel.setTextFormat(Qt.PlainText)
-        self.status_panel.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.status_panel.setMinimumWidth(260)
-        self.status_panel.setStyleSheet(
-            "QLabel { "
-            "background: rgba(255,255,255,.06); "
-            "padding:12px; "
-            "border:1px solid rgba(0,0,0,.15); "
-            "border-radius:8px; "
-            "}"
-        )
+        self._step_icon_labels: dict[str, QLabel] = {}
 
-        # --- left: log
+        top_layout = QHBoxLayout()
+        top_layout.setSpacing(24)
+        top_layout.setContentsMargins(16, 16, 16, 8)
+
+        for step in self._steps:
+            icon_label = SpinningIconLabel(spinner_path, size=32)
+            icon_label.setStyleSheet("padding: 0px; margin: 0px; border: none;")
+            icon_label.setFixedSize(32, 32)
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setScaledContents(True)
+
+            # initial state = idle (static)
+            icon_label.setPixmap(self._status_icons["idle"])
+            icon_label.stop()  # make sure timer isn't running
+
+            text_label = QLabel(step.label)
+            text_label.setAlignment(Qt.AlignCenter)
+
+            step_layout = QVBoxLayout()
+            step_layout.setSpacing(4)
+            step_layout.addWidget(icon_label, alignment=Qt.AlignCenter)
+            step_layout.addWidget(text_label, alignment=Qt.AlignCenter)
+            step_layout.addStretch(1)
+
+            container = QWidget()
+            container.setLayout(step_layout)
+            top_layout.addWidget(container, 1)
+
+            self._step_icon_labels[step.name] = icon_label
+
         self.log = QTextEdit()
         self.log.setReadOnly(True)
 
-        mid = QHBoxLayout()
-        mid.setContentsMargins(16, 0, 16, 0)
-        mid.setSpacing(16)
-        mid.addWidget(self.log, 2)
-        mid.addWidget(self.status_panel, 1)
-
-        # --- bottom: buttons
-        self.run_btn = QPushButton("Run Diagnostics")
-        self.close_btn = QPushButton("Close")
-        self.run_btn.clicked.connect(self.start_diagnostic)
-        self.close_btn.clicked.connect(self.close)
-
         btns = QHBoxLayout()
         btns.setContentsMargins(16, 8, 16, 16)
+        self.run_btn = QPushButton("Run Diagnostics")
+        self.run_btn.clicked.connect(self.start_diagnostic)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
         btns.addStretch(1)
         btns.addWidget(self.run_btn)
+        if self._logger is not None:
+            self.log_btn = QPushButton("Open Log")
+            self.log_btn.clicked.connect(self._logger.show)
+            btns.addWidget(self.log_btn)
         btns.addWidget(self.close_btn)
 
-        # --- root layout
         root = QVBoxLayout(self)
-        root.addLayout(stepper)
-        root.addLayout(mid)
+        root.addLayout(top_layout)
+        root.addWidget(self.log)
         root.addLayout(btns)
 
-        self._update_status_panel("Unknown", "Unknown", "Unknown")
-
-        # thread handle
-        self._thr: Diagnostic | None = None
-
-    # -------------------------------------------------
-    # UI helpers
-    # -------------------------------------------------
-
-    def _update_status_panel(self, network: str, internet: str, service: str):
-        lines = [
-            "Your network status:",
-            f"Network:  {network}",
-            f"Internet: {internet}",
-            f"Service:  {service}",
-        ]
-        self.status_panel.setText("\n".join(lines))
-
-    def _set_all(self, state: str = "idle"):
-        self.dev_ind.set_state(state)
-        self.net_ind.set_state(state)
-        self.int_ind.set_state(state)
-        self.svc_ind.set_state(state)
-
-    # -------------------------------------------------
-    # Start diagnostics
-    # -------------------------------------------------
+        self._thr: Optional[DiagnosticThread] = None
 
     def start_diagnostic(self):
+        self._logger.append(f"[DiagnosticDialog] Starting diagnostics with {len(self._steps)} steps...", channel="diagnostic", level="debug")
         self.log.clear()
-        self._set_all("idle")
+
+        for label in self._step_icon_labels.values():
+            if isinstance(label, SpinningIconLabel):
+                label.stop()
+            label.setPixmap(self._status_icons["idle"])
+
         self.run_btn.setEnabled(False)
 
-        # If host not provided, try to guess from tools (e.g. gateway or first IP)
-        host = self._host
-        ports = self._ports
-
-        self._thr = Diagnostic(host=host, ports=ports, parent=self)
+        self._thr = DiagnosticThread(self._steps, parent=self)
         self._thr.log.connect(self._on_log)
-        self._thr.phase.connect(self._on_phase)       # phase, state
-        self._thr.summary.connect(self._on_summary)   # network, internet, service
-        self._thr.finished.connect(lambda: self.run_btn.setEnabled(True))
+        self._thr.step_state.connect(self._on_step_state)
+        self._thr.finished.connect(self._on_finished)
+        self._thr.finished.connect(lambda _: self.run_btn.setEnabled(True))
         self._thr.start()
+        self._logger.append("[DiagnosticDialog] DiagnosticThread created and started", channel="diagnostic", level="debug")
 
-    # -------------------------------------------------
-    # Slots for worker signals
-    # -------------------------------------------------
-
-    def _on_log(self, s: str):
+    def _on_log(self, s: str) -> None:
+        self._logger.append(s, channel="diagnostic", level="debug")
         self.log.append(s)
 
-    def _on_phase(self, phase: str, state: str):
-        mapping = {
-            "device": self.dev_ind,
-            "network": self.net_ind,
-            "internet": self.int_ind,
-            "service": self.svc_ind,
-        }
-        if phase in mapping:
-            mapping[phase].set_state(state)
+    def _on_step_state(self, name: str, state: str) -> None:
+        self._logger.append(
+            f"[DiagnosticDialog] Step {name} state changed to {state}",
+            channel="diagnostic",
+            level="debug",
+        )
 
-    def _on_summary(self, network: bool, internet: bool, service: bool):
-        def t(b: bool) -> str:
-            return "Connected" if b else "Not connected"
+        label = self._step_icon_labels.get(name)
+        if not label:
+            return
 
-        self._update_status_panel(t(network), t(internet), t(service))
+        # We only created SpinningIconLabel instances, but be defensive:
+        if isinstance(label, SpinningIconLabel):
+            if state == "idle":
+                # QLabel behavior (static idle icon)
+                label.stop()
+                label.setPixmap(self._status_icons["idle"])
+
+            elif state == "running":
+                # SpinningIconLabel behavior (spinner icon + animation)
+                label.setPixmap(self._status_icons["running"])
+                label.start()
+
+            elif state == "ok":
+                # QLabel behavior (static success icon)
+                label.stop()
+                label.setPixmap(self._status_icons["ok"])
+
+            elif state == "fail":
+                # QLabel behavior (static error icon)
+                label.stop()
+                label.setPixmap(self._status_icons["fail"])
+
+            else:
+                # Unknown state -> default back to idle, no animation
+                self._logger.append(
+                    f"[DiagnosticDialog] Unknown state '{state}' for step '{name}', defaulting to idle",
+                    channel="diagnostic",
+                    level="warning",
+                )
+                label.stop()
+                label.setPixmap(self._status_icons["idle"])
+
+            return
+
+        # Fallback for plain QLabel (just in case)
+        pix = self._status_icons.get(state)
+        if pix is not None:
+            label.setPixmap(pix)
+
+    def _on_finished(self, results: dict) -> None:
+        success = all(bool(v) for v in results.values()) if results else False
+        self._logger.append(f"[DiagnosticDialog] Diagnostics finished with results: {results}, success={success}", channel="diagnostic", level="debug")
+        self.finished.emit(success)
