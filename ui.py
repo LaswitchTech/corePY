@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# src/app/ui.py
+# src/core/ui.py
 
 from __future__ import annotations
 

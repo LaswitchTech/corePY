@@ -255,6 +255,9 @@ class DiagnosticDialog(QDialog):
         self._logger.append(f"[DiagnosticDialog] Starting diagnostics with {len(self._steps)} steps...", channel="diagnostic", level="debug")
         self.log.clear()
         for label in self._step_icon_labels.values():
+            # Reset all icons to idle; stop animation for spinners
+            if isinstance(label, SpinningIconLabel):
+                label.stop()
             label.setPixmap(self._status_icons["idle"])
         self.run_btn.setEnabled(False)
 
@@ -271,18 +274,23 @@ class DiagnosticDialog(QDialog):
         self.log.append(s)
 
     def _on_step_state(self, name: str, state: str) -> None:
-        self._logger.append(f"[DiagnosticDialog] Step {name} state changed to {state}", channel="diagnostic", level="debug")
+        self._logger.append(
+            f"[DiagnosticDialog] Step {name} state changed to {state}",
+            channel="diagnostic",
+            level="debug",
+        )
         label = self._step_icon_labels.get(name)
         if not label:
             return
 
-        # If this is a SpinningIconLabel, handle animation
+        # If this is a SpinningIconLabel, handle animation + final icons
         if isinstance(label, SpinningIconLabel):
             if state == "running":
+                # Start the spinner animation
                 label.start()
             else:
+                # Stop animation and show the appropriate static icon
                 label.stop()
-                # show static icon for success or fail
                 if state == "ok":
                     label.setPixmap(self._status_icons["success"])
                 elif state == "fail":
@@ -290,6 +298,18 @@ class DiagnosticDialog(QDialog):
                 else:
                     label.setPixmap(self._status_icons["idle"])
             return
+
+        # Fallback for normal QLabel-based icons
+        pix = self._status_icons.get(state)
+        if pix is not None:
+            label.setPixmap(pix)
+        else:
+            # Unknown state; log and leave as-is
+            self._logger.append(
+                f"[DiagnosticDialog] Unknown state '{state}' for step '{name}'",
+                channel="diagnostic",
+                level="warning",
+            )
 
     def _on_finished(self, results: dict) -> None:
         success = all(bool(v) for v in results.values()) if results else False
