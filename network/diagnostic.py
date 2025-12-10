@@ -202,7 +202,18 @@ class DiagnosticDialog(QDialog):
         top_layout.setContentsMargins(16, 16, 16, 8)
 
         for step in self._steps:
-            if step.icon == "spinner":
+            # Decide whether this step should use the animated spinner.
+            # Be tolerant: allow "spinner", "spinner.svg", or any icon string containing "spinner".
+            use_spinner = False
+            if isinstance(step.icon, str) and "spinner" in step.icon:
+                use_spinner = True
+
+            if use_spinner:
+                self._logger.append(
+                    f"[DiagnosticDialog] Using SpinningIconLabel for step '{step.name}' (icon={step.icon!r})",
+                    channel="diagnostic",
+                    level="debug",
+                )
                 icon_label = SpinningIconLabel(spinner_path, size=32)
             else:
                 icon_label = QLabel()
