@@ -201,9 +201,13 @@ class DiagnosticDialog(QDialog):
 
         for step in self._steps:
             icon_label = QLabel()
+            # Avoid style-sheet padding/margins clipping the pixmap
+            icon_label.setStyleSheet("padding: 0px; margin: 0px; border: none;")
             icon_label.setPixmap(self._status_icons["idle"])
             icon_label.setFixedSize(48, 48)
             icon_label.setAlignment(Qt.AlignCenter)
+            # Ensure the full SVG (including outer circle) is scaled into the label rect
+            icon_label.setScaledContents(True)
 
             text_label = QLabel(step.label)
             text_label.setAlignment(Qt.AlignCenter)
