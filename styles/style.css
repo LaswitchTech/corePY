@@ -13,7 +13,7 @@ QTabWidget::pane {
     top: -1px;
 }
 
-QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab, QTableWidget, QTableView {
+QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab {
     font-size: 14px;
     border: 1px solid #76797C;
     border-radius: 5px;
@@ -128,19 +128,21 @@ QTableView, QTableWidget {
     selection-background-color: #0d6efd;
     selection-color: #FFFFFF;
     outline: 0;
+    padding: 0px;
+    margin: 5px 0px;
 }
 
 QHeaderView::section {
     background-color: #414344;
     color: #FFFFFF;
-    border: 1px solid #76797C;
+    border: 1px solid #414344;
     padding: 8px 10px;
 }
 
 QTableCornerButton::section {
     background-color: #414344;
     color: #FFFFFF;
-    border: 1px solid #76797C;
+    border: 1px solid #414344;
     padding: 8px 10px;
 }
 
