@@ -30,5 +30,9 @@ Contributions to corePY are welcome! If you have ideas for new features or have 
   - **Create a New Branch**: For new features or bug fixes, create a new branch in your fork.
   - **Submit a Pull Request**: Once your changes are ready, submit a pull request to the main repository.
 
+## To Do
+  - **Provisioning System**: Develop a provisioning system for easier deployment and management.
+  - **Log on file**: Add the ability to save the log on file.
+
 ## Wait, where is the documentation?
 Review the [Documentation](https://laswitchtech.com/en/blog/projects/corepy/index).
