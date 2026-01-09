@@ -13,7 +13,7 @@ QTabWidget::pane {
     top: -1px;
 }
 
-QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab {
+QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab, QTableWidget, QTableView {
     font-size: 14px;
     border: 1px solid #76797C;
     border-radius: 5px;
@@ -117,6 +117,51 @@ QAbstractItemView::item:hover {
     background-color: #5f6263;
     border: none;
 }
+
+/* Added styling for QTableView and QTableWidget to match dark theme */
+QTableView, QTableWidget {
+    border: 1px solid #76797C;
+    border-radius: 5px;
+    background-color: #212121;
+    color: #FFFFFF;
+    gridline-color: #414344;
+    selection-background-color: #0d6efd;
+    selection-color: #FFFFFF;
+    outline: 0;
+}
+
+QHeaderView::section {
+    background-color: #414344;
+    color: #FFFFFF;
+    border: 1px solid #76797C;
+    padding: 8px 10px;
+}
+
+QTableCornerButton::section {
+    background-color: #414344;
+    color: #FFFFFF;
+    border: 1px solid #76797C;
+    padding: 8px 10px;
+}
+
+QTableView::item, QTableWidget::item {
+    padding: 6px 10px;
+    border: none;
+}
+
+QTableView::item:hover, QTableWidget::item:hover {
+    background-color: #5f6263;
+}
+
+QTableView::item:selected, QTableWidget::item:selected {
+    background-color: #0d6efd;
+    color: #FFFFFF;
+}
+
+QTableView:focus, QTableWidget:focus {
+    outline: 0;
+}
+
 QComboBox QFrame,
 QFrame#qt_qcombobox_popup {
     background-color: #212121;
