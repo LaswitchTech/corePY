@@ -61,6 +61,9 @@ class FileSystem:
         self._logger = logger
         self._os: str = self._helper.get_os()
 
+        # Cache for tool capability detection
+        self._rsync_caps: Optional[dict[str, bool]] = None
+
     # ------------------------------------------------------------------
     # Small helpers
     # ------------------------------------------------------------------
@@ -76,6 +79,87 @@ class FileSystem:
             except Exception:
                 pass
         # Fallback: silent unless explicitly needed
+
+    def _rsync_capabilities(self) -> dict[str, bool]:
+        """Detect which rsync flags are supported on this host.
+
+        macOS often ships an older rsync that does not support -A/-X.
+        We detect capabilities once and cache them.
+        """
+        if self._rsync_caps is not None:
+            return self._rsync_caps
+
+        caps = {
+            "has_rsync": False,
+            "acls": False,        # -A / --acls
+            "xattrs": False,      # -X / --xattrs
+            "hardlinks": False,   # -H / --hard-links
+            "numeric_ids": False, # --numeric-ids
+        }
+
+        rsync = shutil.which("rsync")
+        if not rsync:
+            self._rsync_caps = caps
+            return caps
+
+        caps["has_rsync"] = True
+
+        # Try `--help` (most reliable to see flag availability)
+        rc, out = self._helper.run([rsync, "--help"])
+        if rc != 0:
+            # If help fails, assume minimal support
+            self._rsync_caps = caps
+            return caps
+
+        help_text = out or ""
+
+        # Look for common help strings
+        if "--acls" in help_text or " -A" in help_text:
+            caps["acls"] = True
+        if "--xattrs" in help_text or " -X" in help_text:
+            caps["xattrs"] = True
+        if "--hard-links" in help_text or " -H" in help_text:
+            caps["hardlinks"] = True
+        if "--numeric-ids" in help_text:
+            caps["numeric_ids"] = True
+
+        self._rsync_caps = caps
+        return caps
+
+    def _build_rsync_args(self, *, allow_deletion: bool, preserve_metadata: bool) -> Optional[list[str]]:
+        """Build a safe rsync argv for the current host.
+
+        We always include `-a` (archive) when preserve_metadata=True.
+        Additional flags (-H/-A/-X/--numeric-ids) are appended only if supported.
+        """
+        caps = self._rsync_capabilities()
+        if not caps.get("has_rsync"):
+            return None
+
+        rsync = shutil.which("rsync") or "rsync"
+
+        args: list[str] = [rsync]
+
+        if preserve_metadata:
+            # archive mode preserves perms, times, symlinks, etc.
+            args.append("-a")
+        else:
+            # minimal recursion + times (best-effort)
+            args.extend(["-r", "-t"])
+
+        if caps.get("hardlinks"):
+            args.append("-H")
+        if preserve_metadata and caps.get("acls"):
+            args.append("-A")
+        if preserve_metadata and caps.get("xattrs"):
+            args.append("-X")
+        if preserve_metadata and caps.get("numeric_ids"):
+            args.append("--numeric-ids")
+
+        if allow_deletion:
+            args.append("--delete")
+
+        return args
 
     def exists(self, path: PathLike) -> bool:
         return os.path.exists(self._p(path))
@@ -284,23 +368,15 @@ class FileSystem:
         # Linux/macOS: rsync
         # -------------------------
         if self._os in ("linux", "macos"):
-            rsync = shutil.which("rsync")
-            if not rsync:
-                return None
-
             # Use trailing slashes to copy contents of src into dst
             src_arg = src.rstrip("/") + "/"
             dst_arg = dst.rstrip("/") + "/"
 
-            args = [
-                rsync,
-                "-aHAX",           # archive + hardlinks + ACLs + xattrs (best-effort)
-                "--numeric-ids",   # preserve uid/gid numerically where possible
-            ]
-            if allow_deletion:
-                args.append("--delete")
+            base = self._build_rsync_args(allow_deletion=allow_deletion, preserve_metadata=True)
+            if not base:
+                return None
 
-            args.extend([src_arg, dst_arg])
+            args = base + [src_arg, dst_arg]
             return CommandSpec(argv=args, label="rsync")
 
         return None
