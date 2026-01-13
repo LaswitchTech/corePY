@@ -107,7 +107,7 @@ class Service:
         if self._configuration is not None:
             # Create a configurable key per task
             key = f"service.intervals.{normalized}"
-            default_interval = int(effective_interval) if effective_interval > 0 else int(self._configuration.get("service.defaultInterval", 60) or 60)
+            default_interval = int(effective_interval) if effective_interval > 0 else int(self._configuration.get("service.defaultInterval", 0) or 0)
             self._configuration.add(
                 key,
                 default_interval,
