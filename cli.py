@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# src/core/command-line.py
+# src/core/cli.py
 import sys
 from typing import Any, Optional
 
@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QApplication
 from .helper import Helper
 from .configuration import Configuration
 from .log import Log
+from .service import Service
 
 # ---------------------------------------------------------------------------
 # CommandLine class
@@ -42,11 +43,16 @@ class CommandLine(QApplication):
         # Logger
         self._logger = Log()
 
+        # Service manager
+        self._service = Service(self._logger, self._configuration)
+
         # Initialize core commands
         if hasattr(self._configuration, "cli") and callable(getattr(self._configuration, "cli")):
             self._configuration.cli(self)
         if hasattr(self._logger, "cli") and callable(getattr(self._logger, "cli")):
             self._logger.cli(self)
+        if hasattr(self._service, "cli") and callable(getattr(self._service, "cli")):
+            self._service.cli(self)
 
     # ------------------------------------------------------------------
     # Properties / accessors
@@ -63,6 +69,10 @@ class CommandLine(QApplication):
     @property
     def configuration(self) -> Configuration:
         return self._configuration
+
+    @property
+    def service(self) -> Service:
+        return self._service
 
     @property
     def name(self) -> str:

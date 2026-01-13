@@ -99,7 +99,7 @@ class Configuration(QObject):
         # Built-in provisioning settings
         self.add("provisioning.host", "", "text", label="Host/URL")
         self.add("provisioning.token", "", "password", label="Token")
-        self.add("provisioning.appid", "PyRDPConnect", "text", label="App ID")
+        self.add("provisioning.appid", self._app.applicationName() if self._app else "corePY App", "text", label="App ID")
 
     # ------------------------------------------------------------------
     # Core API
