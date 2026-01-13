@@ -199,14 +199,6 @@ class Application(QApplication):
         # Service manager
         self._service = Service(self._logger, self._configuration)
 
-        # Initialize core commands
-        if hasattr(self._configuration, "cli") and callable(getattr(self._configuration, "cli")):
-            self._configuration.cli(self)
-        if hasattr(self._logger, "cli") and callable(getattr(self._logger, "cli")):
-            self._logger.cli(self)
-        if hasattr(self._service, "cli") and callable(getattr(self._service, "cli")):
-            self._service.cli(self)
-
         # Initial stylesheet load
         self._loadStylesheet()
 
