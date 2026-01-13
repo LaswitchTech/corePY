@@ -53,6 +53,7 @@ class Service:
 
         # Service configuration defaults
         if self._configuration is not None:
+            print("Initializing service configuration defaults...")
             # How often the main loop wakes up to check due tasks (seconds)
             self._configuration.add("service.loopSleep", 1, "number", label="Service loop sleep (s)", min=1, max=60)
             # Default interval used when registering tasks (seconds)
