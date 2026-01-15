@@ -117,12 +117,14 @@ class SQLite:
         )
         conn.row_factory = sqlite3.Row
 
-        # Sensible defaults
-        self.execute("PRAGMA foreign_keys = ON;")
-        self.execute("PRAGMA journal_mode = WAL;")   # good concurrency for desktop apps
-        self.execute("PRAGMA synchronous = NORMAL;") # good balance for WAL
-
+        # IMPORTANT: set _conn before running any PRAGMAs to avoid recursion
         self._conn = conn
+
+        # Sensible defaults (execute directly on the connection to avoid calling self.execute/connect)
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")   # good concurrency for desktop apps
+        conn.execute("PRAGMA synchronous = NORMAL;") # good balance for WAL
+
         return conn
 
     def close(self) -> None:
