@@ -57,7 +57,7 @@ class Service:
             # How often the main loop wakes up to check due tasks (seconds)
             self._configuration.add("service.loopSleep", 1, "number", label="Service loop sleep (s)", min=1, max=60)
             # Default interval used when registering tasks (seconds)
-            self._configuration.add("service.defaultInterval", 0, "number", label="Service default task interval (s)", min=0, max=86400)
+            self._configuration.add("service.defaultInterval", 3600, "number", label="Service default task interval (s)", min=0, max=86400)
             # Persist any new defaults
             self._configuration.save()
 
@@ -87,7 +87,7 @@ class Service:
         description: str = "",
         callable: Optional[Callable[..., Any]] = None,
         *,
-        interval: float = 0.0,
+        interval: Optional[float] = None,
     ) -> None:
         """Register a command to run as part of the service loop.
 
@@ -103,27 +103,43 @@ class Service:
         normalized = command[2:] if command.startswith("--") else command
 
         # Resolve effective interval from configuration (if present)
-        effective_interval = float(interval) if interval else 0.0
+        # - interval is None: use configured service.defaultInterval (default 3600)
+        # - interval == 0: run every tick
+        # - interval > 0: use that value (and allow override via per-task config)
+        if interval is None:
+            effective_interval = 0.0
+        else:
+            effective_interval = float(interval)
+
         if self._configuration is not None:
-            # Create a configurable key per task
             key = f"service.intervals.{normalized}"
-            default_interval = int(effective_interval) if effective_interval > 0 else int(self._configuration.get("service.defaultInterval", 0) or 0)
+
+            # Schema default for this task's interval
+            if interval is None:
+                schema_default = int(self._configuration.get("service.defaultInterval", 3600) or 3600)
+            else:
+                schema_default = int(effective_interval)
+
             self._configuration.add(
                 key,
-                default_interval,
+                schema_default,
                 "spin",
                 label=f"Service interval: {normalized} (s)",
                 min=0,
                 max=86400,
             )
-            # Pull the configured value (falls back to schema default)
+
             try:
-                configured = self._configuration.get(key, default_interval)
-                effective_interval = float(configured) if configured is not None else float(default_interval)
+                configured = self._configuration.get(key, schema_default)
+                effective_interval = float(configured) if configured is not None else float(schema_default)
             except Exception:
-                effective_interval = float(default_interval)
-            # Persist any new defaults
+                effective_interval = float(schema_default)
+
             self._configuration.save()
+        else:
+            # No configuration system; if interval is None, fall back to 3600
+            if interval is None:
+                effective_interval = 3600.0
 
         self._tasks[normalized] = _Task(
             description=description,
