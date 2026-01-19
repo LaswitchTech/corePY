@@ -57,7 +57,7 @@ class Service:
             # How often the main loop wakes up to check due tasks (seconds)
             self._configuration.add("service.loopSleep", 1, "number", label="Service loop sleep (s)", min=1, max=60)
             # Default interval used when registering tasks (seconds)
-            self._configuration.add("service.defaultInterval", 3600, "number", label="Service default task interval (s)", min=0, max=86400)
+            self._configuration.add("service.defaultInterval", 3600, "number", label="Service default task interval (s)", min=1, max=86400)
             # Persist any new defaults
             self._configuration.save()
 
