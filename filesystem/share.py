@@ -102,6 +102,8 @@ class Share:
         self._last_probe_ok: Optional[bool] = None
         self._last_probe_message: Optional[str] = None
         self._rclone_obscure_cache: Dict[str, str] = {}
+        self._rclone_proc: Optional[subprocess.Popen] = None
+        self._rclone_proc_mount_point: Optional[str] = None
 
     # ---------------------------------------------------------------------
     # Public API
@@ -190,7 +192,24 @@ class Share:
         # Prefer backend-specific unmount where required
         if self._backend == "rclone":
             rclone = self._bin("rclone")
-            self._run([rclone, "unmount", mp], elevate=elevate, timeout=timeout)
+            # Try rclone's unmount first
+            try:
+                self._run([rclone, "unmount", mp], elevate=elevate, timeout=timeout)
+            finally:
+                # Best-effort: terminate any background rclone mount we started
+                if self._rclone_proc is not None:
+                    try:
+                        if self._rclone_proc.poll() is None:
+                            self._rclone_proc.terminate()
+                            try:
+                                self._rclone_proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                self._rclone_proc.kill()
+                    except Exception:
+                        pass
+                    self._rclone_proc = None
+                    self._rclone_proc_mount_point = None
+
             ok_after, msg_after = self._probe_mount(mp, timeout=min(5, timeout))
             self._log_debug(f"Share post-unmount probe: mount_point={mp} ok={ok_after} msg={msg_after}")
             return
@@ -444,11 +463,16 @@ class Share:
         if read_only:
             cmd += ["--read-only"]
 
-        # On Unix-like systems, prefer daemon mode so the call returns.
-        if not self._is_windows():
-            cmd += ["--daemon"]
+        if self._is_windows():
+            # On Windows, rclone mount blocks the console; use direct run (caller is expected
+            # to manage lifetime differently).
+            self._run(cmd, elevate=False, timeout=timeout)
+            return
 
-        self._run(cmd, elevate=False, timeout=timeout)
+        # On Unix-like systems, run rclone in the background (more reliable than --daemon
+        # and gives us real stderr when mount fails).
+        self._rclone_proc_mount_point = mount_point
+        self._run_background(cmd, timeout=timeout)
 
     # ---------------------------------------------------------------------
     # Helpers
@@ -750,3 +774,59 @@ class Share:
                 return False, f"drive listdir failed: {e}"
         except Exception as e:
             return False, f"drive probe exception: {e}"
+
+    def _run_background(self, cmd: List[str], *, timeout: int) -> None:
+        """Run a command in the background.
+
+        Used primarily for rclone mounts so we can keep the mount alive while returning
+        control to the caller, without relying on rclone's --daemon wrapper.
+
+        Raises ShareError if the process exits quickly with an error.
+        """
+        self._last_cmd = cmd
+
+        # Redact secrets from command for logging (same logic as _run)
+        printable = []
+        for c in cmd:
+            s = str(c)
+            for token in ("pass=", "password=", "pwd="):
+                if token in s:
+                    parts = s.split(token)
+                    rebuilt = [parts[0]]
+                    for rest in parts[1:]:
+                        secret_end = len(rest)
+                        for sep in (",", ":"):
+                            idx = rest.find(sep)
+                            if idx != -1:
+                                secret_end = min(secret_end, idx)
+                        rebuilt.append(token + "***" + rest[secret_end:])
+                    s = "".join(rebuilt)
+            printable.append(shlex.quote(s))
+        self._log_debug("Executing (bg): " + " ".join(printable))
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise ShareError(f"Required executable not found: {cmd[0]}") from e
+
+        # Give the process a short moment to fail fast (e.g. missing FUSE)
+        deadline = time.time() + max(1.0, min(float(timeout), 10.0))
+        while time.time() < deadline:
+            rc = proc.poll()
+            if rc is None:
+                # still running
+                self._rclone_proc = proc
+                return
+
+            # exited early; capture stderr/stdout for error context
+            out, err = proc.communicate(timeout=1)
+            msg = (err or out or "").strip()
+            raise ShareError(f"Mount command failed (code {rc}): {msg}")
+
+        # Still running after initial window
+        self._rclone_proc = proc
