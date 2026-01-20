@@ -49,6 +49,7 @@ import platform
 import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -98,6 +99,8 @@ class Share:
         self._backend: Optional[str] = None  # native_smb_linux|native_smb_macos|native_smb_windows|sshfs|curlftpfs|rclone
         self._last_cmd: Optional[List[str]] = None
         self._last_mount_point: Optional[str] = None
+        self._last_probe_ok: Optional[bool] = None
+        self._last_probe_message: Optional[str] = None
 
     # ---------------------------------------------------------------------
     # Public API
@@ -163,6 +166,12 @@ class Share:
         else:
             raise ShareError(f"Unsupported protocol: {protocol}")
 
+        # Probe the mount to confirm it is usable.
+        ok, msg = self._probe_mount(mount_point, timeout=timeout)
+        self._last_probe_ok = ok
+        self._last_probe_message = msg
+        self._log_debug(f"Share mount probe: mount_point={mount_point} ok={ok} msg={msg}")
+
         self._last_mount_point = mount_point
 
     def umount(self, mount_point: Optional[str] = None, *, elevate: bool = False, timeout: int = 60) -> None:
@@ -173,10 +182,16 @@ class Share:
 
         self._log_debug(f"Unmount request: mount_point={mp} backend={self._backend}")
 
+        # Best-effort probe before unmount.
+        ok_before, msg_before = self._probe_mount(mp, timeout=min(5, timeout))
+        self._log_debug(f"Share pre-unmount probe: mount_point={mp} ok={ok_before} msg={msg_before}")
+
         # Prefer backend-specific unmount where required
         if self._backend == "rclone":
             rclone = self._bin("rclone")
             self._run([rclone, "unmount", mp], elevate=elevate, timeout=timeout)
+            ok_after, msg_after = self._probe_mount(mp, timeout=min(5, timeout))
+            self._log_debug(f"Share post-unmount probe: mount_point={mp} ok={ok_after} msg={msg_after}")
             return
 
         system = platform.system().lower()
@@ -184,11 +199,15 @@ class Share:
             # For SMB we typically used net use; deleting by mount point is OK.
             # Example: net use Z: /delete /y
             self._run(["net", "use", mp, "/delete", "/y"], elevate=False, timeout=timeout)
+            ok_after, msg_after = self._probe_mount(mp, timeout=min(5, timeout))
+            self._log_debug(f"Share post-unmount probe: mount_point={mp} ok={ok_after} msg={msg_after}")
             return
 
         # Linux/macOS
         umount_bin = shutil.which("umount") or "umount"
         self._run((["sudo"] if elevate else []) + [umount_bin, mp], elevate=False, timeout=timeout)
+        ok_after, msg_after = self._probe_mount(mp, timeout=min(5, timeout))
+        self._log_debug(f"Share post-unmount probe: mount_point={mp} ok={ok_after} msg={msg_after}")
 
     # ---------------------------------------------------------------------
     # SMB
@@ -424,7 +443,10 @@ class Share:
         if read_only:
             cmd += ["--read-only"]
 
-        # Windows: rclone mount is foreground by default; user can run it in service mode.
+        # On Unix-like systems, prefer daemon mode so the call returns.
+        if not self._is_windows():
+            cmd += ["--daemon"]
+
         self._run(cmd, elevate=False, timeout=timeout)
 
     # ---------------------------------------------------------------------
@@ -599,3 +621,75 @@ class Share:
                     return
         # Silent by default
 
+
+    def _probe_mount(self, mount_point: str, *, timeout: int = 10) -> Tuple[bool, str]:
+        """Best-effort probe to determine if a mount point is usable.
+
+        We avoid relying solely on os.path.ismount (unreliable for some FUSE setups).
+        Strategy:
+          - Windows drive letter: check if it exists and list root.
+          - Directory mounts: attempt listdir and optional backend-specific checks.
+        """
+        try:
+            if self._is_windows_drive_letter(mount_point):
+                return self._probe_windows_drive(mount_point)
+
+            mp = str(mount_point)
+            if not os.path.exists(mp):
+                return False, "mount point does not exist"
+            if not os.path.isdir(mp):
+                return False, "mount point is not a directory"
+
+            # For rclone mounts, a listdir may succeed even if backend is not ready.
+            # So we attempt a quick rclone ls/lsf when possible.
+            if self._backend == "rclone":
+                try:
+                    rclone = self._bin("rclone")
+                    # lsf will fail if the mount is not accessible.
+                    completed = subprocess.run(
+                        [rclone, "lsf", mp, "--max-depth", "1"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=max(2, min(timeout, 5)),
+                        check=False,
+                    )
+                    if completed.returncode == 0:
+                        return True, "rclone lsf ok"
+                    msg = (completed.stderr or completed.stdout or "").strip() or f"rclone lsf failed ({completed.returncode})"
+                    return False, msg
+                except Exception as e:
+                    # Fall back to listdir below
+                    self._log_debug(f"Probe: rclone lsf check failed, falling back to listdir: {e}")
+
+            # Generic: listdir with short retry window (useful right after mount)
+            deadline = time.time() + float(timeout)
+            last_err: Optional[str] = None
+            while time.time() < deadline:
+                try:
+                    _ = os.listdir(mp)
+                    return True, "listdir ok"
+                except Exception as e:
+                    last_err = str(e)
+                    time.sleep(0.25)
+
+            return False, f"listdir failed: {last_err or 'unknown error'}"
+
+        except Exception as e:
+            return False, f"probe exception: {e}"
+
+    def _probe_windows_drive(self, drive: str) -> Tuple[bool, str]:
+        try:
+            d = drive.upper()
+            if not d.endswith(":"):
+                d += ":"
+            root = d + "\\"
+            if not os.path.exists(root):
+                return False, "drive root does not exist"
+            try:
+                _ = os.listdir(root)
+                return True, "drive listdir ok"
+            except Exception as e:
+                return False, f"drive listdir failed: {e}"
+        except Exception as e:
+            return False, f"drive probe exception: {e}"
