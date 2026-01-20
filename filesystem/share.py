@@ -101,6 +101,7 @@ class Share:
         self._last_mount_point: Optional[str] = None
         self._last_probe_ok: Optional[bool] = None
         self._last_probe_message: Optional[str] = None
+        self._rclone_obscure_cache: Dict[str, str] = {}
 
     # ---------------------------------------------------------------------
     # Public API
@@ -408,7 +409,7 @@ class Share:
         #   rclone mount ":ftp,host=example.com,user=u,pass=...,": /mnt
         #   rclone mount ":sftp,host=example.com,user=u,pass=...,port=22": /mnt
         #   rclone mount ":smb,host=example.com,user=u,pass=...,share=Share": /mnt
-        # Note: rclone expects password in plain; it may be obscured in process list.
+        # Note: rclone expects password in obscured form for :ftp,pass=...: etc.
 
         params = {
             "host": target.host,
@@ -416,7 +417,7 @@ class Share:
         if auth.username:
             params["user"] = auth.username
         if auth.password:
-            params["pass"] = auth.password
+            params["pass"] = self._rclone_obscure(auth.password)
         if scheme == "sftp":
             params["port"] = str(target.port or 22)
             if target.path:
@@ -457,7 +458,27 @@ class Share:
         # `elevate` here is used only if caller explicitly wants it; we keep it as a hook.
         # Most commands are constructed with sudo already when needed.
         self._last_cmd = cmd
-        self._log_debug("Executing: " + " ".join(shlex.quote(c) for c in cmd))
+        # Redact secrets from command for logging
+        printable = []
+        for c in cmd:
+            s = str(c)
+            # Redact common credential patterns (covers rclone on-the-fly remotes)
+            for token in ("pass=", "password=", "pwd="):
+                if token in s:
+                    # replace value until next comma or end
+                    parts = s.split(token)
+                    rebuilt = [parts[0]]
+                    for rest in parts[1:]:
+                        # rest begins with secret
+                        secret_end = len(rest)
+                        for sep in (",", ":"):
+                            idx = rest.find(sep)
+                            if idx != -1:
+                                secret_end = min(secret_end, idx)
+                        rebuilt.append(token + "***" + rest[secret_end:])
+                    s = "".join(rebuilt)
+            printable.append(shlex.quote(s))
+        self._log_debug("Executing: " + " ".join(printable))
 
         try:
             completed = subprocess.run(
@@ -611,6 +632,42 @@ class Share:
         # rclone remote definition uses commas and colons as separators; escape them.
         # Keep it simple: backslash-escape commas and colons.
         return str(s).replace("\\", "\\\\").replace(",", "\\,").replace(":", "\\:")
+
+    def _rclone_obscure(self, plain: str) -> str:
+        """Return rclone-obscured form of a password.
+
+        When using on-the-fly remotes like ":ftp,...,pass=...:", rclone expects the
+        password to be in its obscured form (same as in rclone.conf), not plain text.
+        """
+        if plain is None:
+            return ""
+        key = str(plain)
+        if key in self._rclone_obscure_cache:
+            return self._rclone_obscure_cache[key]
+
+        rclone = self._bin("rclone")
+        try:
+            completed = subprocess.run(
+                [rclone, "obscure", key],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except FileNotFoundError as e:
+            raise ShareError("rclone executable not found for password obfuscation") from e
+
+        if completed.returncode != 0:
+            msg = (completed.stderr or completed.stdout or "").strip()
+            raise ShareError(f"Failed to obscure password with rclone (code {completed.returncode}): {msg}")
+
+        obscured = (completed.stdout or "").strip()
+        if not obscured:
+            raise ShareError("Failed to obscure password with rclone: empty output")
+
+        self._rclone_obscure_cache[key] = obscured
+        return obscured
 
     def _log_debug(self, msg: str) -> None:
         if self._logger is not None:
