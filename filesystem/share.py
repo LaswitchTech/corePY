@@ -424,6 +424,7 @@ class Share:
     ) -> None:
         self._backend = "rclone"
         rclone = self._bin("rclone")
+        self._log_debug(f"[Share] Using rclone binary: {rclone}")
 
         # rclone can mount using an on-the-fly remote definition:
         #   rclone mount ":ftp,host=example.com,user=u,pass=...,": /mnt
@@ -631,9 +632,14 @@ class Share:
         # Prefer bundled rclone when available.
         if name.lower() == "rclone":
             for c in candidates:
-                bundled = root / name / os_name / arch / "bin" / c
-                if bundled.exists() and bundled.is_file():
-                    return str(bundled)
+                # Support both layouts:
+                #   src/bin/rclone/<os>/<arch>/bin/rclone
+                #   src/bin/rclone/<os>/<arch>/rclone
+                bundled_bin = root / name / os_name / arch / "bin" / c
+                bundled_flat = root / name / os_name / arch / c
+                for bundled in (bundled_bin, bundled_flat):
+                    if bundled.exists() and bundled.is_file():
+                        return str(bundled)
 
         # PATH
         for c in candidates:
@@ -643,9 +649,11 @@ class Share:
 
         # Bundled (fallback)
         for c in candidates:
-            bundled = root / name / os_name / arch / "bin" / c
-            if bundled.exists() and bundled.is_file():
-                return str(bundled)
+            bundled_bin = root / name / os_name / arch / "bin" / c
+            bundled_flat = root / name / os_name / arch / c
+            for bundled in (bundled_bin, bundled_flat):
+                if bundled.exists() and bundled.is_file():
+                    return str(bundled)
 
         return candidates[0]
 
@@ -677,16 +685,42 @@ class Share:
     def _resolve_bin_root(self) -> Path:
         if self._bin_root:
             return self._bin_root
-        # We expect this file under src/core/... or corePY/... and bin under src/bin
+
         here = Path(__file__).resolve()
-        # Walk up a bit and look for "src/bin"
-        for parent in [here.parent] + list(here.parents):
-            candidate = parent / "src" / "bin"
+
+        # Likely roots to search (covers running as a library from another repo).
+        search_roots: List[Path] = []
+
+        # 1) Current working directory (common when the app repo contains src/bin)
+        try:
+            search_roots.append(Path.cwd())
+        except Exception:
+            pass
+
+        # 2) This file location and parents
+        search_roots.append(here.parent)
+        search_roots.extend(list(here.parents))
+
+        # 3) Repo-style locations relative to this file
+        search_roots.append(here.parent.parent)
+        search_roots.append(here.parent.parent.parent)
+
+        # Check for src/bin first
+        for root in search_roots:
+            candidate = root / "src" / "bin"
             if candidate.exists():
                 self._bin_root = candidate
                 return candidate
-        # fallback relative to file
-        self._bin_root = here.parent.parent / "bin"
+
+        # Check for bin (some projects may use bin directly)
+        for root in search_roots:
+            candidate = root / "bin"
+            if candidate.exists():
+                self._bin_root = candidate
+                return candidate
+
+        # As a last resort, default to <cwd>/src/bin even if missing.
+        self._bin_root = Path.cwd() / "src" / "bin"
         return self._bin_root
 
     def _os_folder(self) -> str:
