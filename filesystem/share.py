@@ -102,6 +102,8 @@ class Share:
         self._last_probe_ok: Optional[bool] = None
         self._last_probe_message: Optional[str] = None
         self._rclone_obscure_cache: Dict[str, str] = {}
+        self._rclone_process: Optional[subprocess.Popen] = None
+        self._rclone_remote: Optional[str] = None
 
     # ---------------------------------------------------------------------
     # Public API
@@ -190,7 +192,25 @@ class Share:
         # Prefer backend-specific unmount where required
         if self._backend == "rclone":
             rclone = self._bin("rclone")
+            # Best effort: unmount via rclone
             self._run([rclone, "unmount", mp], elevate=elevate, timeout=timeout)
+
+            # Best effort: terminate background rclone mount process if we started it
+            if self._rclone_process is not None:
+                try:
+                    if self._rclone_process.poll() is None:
+                        self._rclone_process.terminate()
+                        try:
+                            self._rclone_process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            self._rclone_process.kill()
+                            self._rclone_process.wait(timeout=5)
+                except Exception as e:
+                    self._log_debug(f"rclone process cleanup failed: {e}")
+                finally:
+                    self._rclone_process = None
+                    self._rclone_remote = None
+
             ok_after, msg_after = self._probe_mount(mp, timeout=min(5, timeout))
             self._log_debug(f"Share post-unmount probe: mount_point={mp} ok={ok_after} msg={msg_after}")
             return
@@ -409,15 +429,14 @@ class Share:
         #   rclone mount ":ftp,host=example.com,user=u,pass=...,": /mnt
         #   rclone mount ":sftp,host=example.com,user=u,pass=...,port=22": /mnt
         #   rclone mount ":smb,host=example.com,user=u,pass=...,share=Share": /mnt
-        # Note: rclone expects password in obscured form for :ftp,pass=...: etc.
+        # NOTE: for on-the-fly remotes, rclone expects the password in *obscured* form.
 
-        params = {
-            "host": target.host,
-        }
+        params = {"host": target.host}
         if auth.username:
             params["user"] = auth.username
         if auth.password:
             params["pass"] = self._rclone_obscure(auth.password)
+
         if scheme == "sftp":
             params["port"] = str(target.port or 22)
             if target.path:
@@ -439,16 +458,100 @@ class Share:
         params.update({k: str(v) for k, v in options.items()})
 
         remote = ":" + scheme + "," + ",".join(f"{k}={self._rclone_escape(v)}" for k, v in params.items()) + ":"
+        self._rclone_remote = remote
+
+        # Preflight: validate remote connectivity BEFORE mounting.
+        # This avoids false positives where a mount directory exists but nothing is actually mounted.
+        self._rclone_preflight(remote, timeout=min(20, max(5, timeout)))
 
         cmd = [rclone, "mount", remote, mount_point]
         if read_only:
             cmd += ["--read-only"]
 
-        # On Unix-like systems, prefer daemon mode so the call returns.
-        if not self._is_windows():
-            cmd += ["--daemon"]
+        # Do NOT use --daemon. It often masks the real error on macOS.
+        # Instead, start rclone as a background process we control and then verify the OS mount table.
+        if self._rclone_process is not None and self._rclone_process.poll() is None:
+            # If a previous process is still around, try to stop it.
+            try:
+                self._rclone_process.terminate()
+            except Exception:
+                pass
+            self._rclone_process = None
 
-        self._run(cmd, elevate=False, timeout=timeout)
+        self._log_debug("Executing (bg): " + " ".join(shlex.quote(c) for c in cmd))
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise ShareError(f"Required executable not found: {cmd[0]}") from e
+
+        self._rclone_process = proc
+
+        # Give rclone a brief moment to either fail fast or begin mounting.
+        deadline = time.time() + float(timeout)
+        last_err: Optional[str] = None
+        while time.time() < deadline:
+            rc = proc.poll()
+            if rc is not None:
+                # Process exited; capture stderr/stdout for the real reason.
+                try:
+                    out, err = proc.communicate(timeout=1)
+                except Exception:
+                    out, err = "", ""
+                msg = (err or out or "").strip() or f"rclone exited with code {rc}"
+                raise ShareError(f"rclone mount failed: {msg}")
+
+            # Check whether the mount point is actually mounted (OS view).
+            ok, msg = self._probe_mount(mount_point, timeout=1)
+            if ok:
+                return
+
+            last_err = msg
+            time.sleep(0.25)
+
+        # Timeout: stop rclone and fail with best available diagnostic.
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except Exception:
+            pass
+        finally:
+            self._rclone_process = None
+
+        raise ShareError(f"rclone mount timed out after {timeout}s: {last_err or 'mount not detected'}")
+    def _rclone_preflight(self, remote: str, *, timeout: int = 15) -> None:
+        """Validate the remote definition before attempting to mount.
+
+        This prevents false positives where the mount directory exists but the mount
+        isn't actually established.
+        """
+        rclone = self._bin("rclone")
+        try:
+            completed = subprocess.run(
+                [rclone, "lsf", remote, "--max-depth", "1"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except FileNotFoundError as e:
+            raise ShareError("rclone executable not found for preflight") from e
+        except subprocess.TimeoutExpired as e:
+            raise ShareError(f"rclone preflight timed out after {timeout}s") from e
+
+        if completed.returncode != 0:
+            msg = (completed.stderr or completed.stdout or "").strip()
+            raise ShareError(f"rclone remote preflight failed (code {completed.returncode}): {msg}")
 
     # ---------------------------------------------------------------------
     # Helpers
@@ -697,27 +800,12 @@ class Share:
             if not os.path.isdir(mp):
                 return False, "mount point is not a directory"
 
-            # For rclone mounts, a listdir may succeed even if backend is not ready.
-            # So we attempt a quick rclone ls/lsf when possible.
+            # For rclone mounts, confirm the OS considers it a mount.
             if self._backend == "rclone":
-                try:
-                    rclone = self._bin("rclone")
-                    # lsf will fail if the mount is not accessible.
-                    completed = subprocess.run(
-                        [rclone, "lsf", mp, "--max-depth", "1"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        timeout=max(2, min(timeout, 5)),
-                        check=False,
-                    )
-                    if completed.returncode == 0:
-                        return True, "rclone lsf ok"
-                    msg = (completed.stderr or completed.stdout or "").strip() or f"rclone lsf failed ({completed.returncode})"
-                    return False, msg
-                except Exception as e:
-                    # Fall back to listdir below
-                    self._log_debug(f"Probe: rclone lsf check failed, falling back to listdir: {e}")
+                ok, msg = self._is_mounted_os(mp)
+                if ok:
+                    return True, msg
+                return False, msg
 
             # Generic: listdir with short retry window (useful right after mount)
             deadline = time.time() + float(timeout)
@@ -750,3 +838,42 @@ class Share:
                 return False, f"drive listdir failed: {e}"
         except Exception as e:
             return False, f"drive probe exception: {e}"
+
+
+    def _is_mounted_os(self, mount_point: str) -> Tuple[bool, str]:
+        """Return True if the OS mount table shows `mount_point` as mounted."""
+        try:
+            system = platform.system().lower()
+            mp = os.path.abspath(mount_point)
+
+            if system == "linux":
+                try:
+                    with open("/proc/mounts", "r", encoding="utf-8", errors="ignore") as f:
+                        data = f.read()
+                    for line in data.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 2 and os.path.abspath(parts[1]) == mp:
+                            return True, "mounted (procfs)"
+                    return False, "not mounted (procfs)"
+                except Exception as e:
+                    # Fall back to `mount`
+                    self._log_debug(f"/proc/mounts unavailable, falling back to mount: {e}")
+
+            # macOS and fallback path
+            mount_bin = shutil.which("mount") or "mount"
+            completed = subprocess.run(
+                [mount_bin],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            out = (completed.stdout or "")
+            # Typical lines contain: "... on /path (type, opts)"
+            needle = f" on {mp} ("
+            if needle in out:
+                return True, "mounted (mount)"
+            return False, "not mounted (mount)"
+        except Exception as e:
+            return False, f"mount check failed: {e}"
