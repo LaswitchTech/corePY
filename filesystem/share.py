@@ -431,6 +431,12 @@ class Share:
         #   rclone mount ":smb,host=example.com,user=u,pass=...,share=Share": /mnt
         # NOTE: for on-the-fly remotes, rclone expects the password in *obscured* form.
 
+        if platform.system().lower() == "darwin" and not self._has_macfuse():
+            raise ShareError(
+                "macFUSE is required for rclone mounts on macOS but does not appear to be installed. "
+                "Install macFUSE (system extension) and allow it in macOS Security & Privacy, then retry."
+            )
+
         params = {"host": target.host}
         if auth.username:
             params["user"] = auth.username
@@ -605,29 +611,60 @@ class Share:
             self._log_debug(completed.stdout.strip())
 
     def _bin(self, name: str) -> str:
-        """Resolve an executable using PATH first, then bundled binaries."""
+        """Resolve an executable.
+
+        Resolution order:
+        1) For rclone: prefer bundled binary (Homebrew rclone on macOS does not support `rclone mount`).
+        2) PATH
+        3) Bundled binary
+        """
         # Windows executables often require .exe
         candidates = [name]
         if platform.system().lower() == "windows" and not name.lower().endswith(".exe"):
             candidates.insert(0, name + ".exe")
-
-        for c in candidates:
-            p = shutil.which(c)
-            if p:
-                return p
 
         # Bundled layout: src/bin/[name]/[OS]/[cpu_architecture]/bin/[exe]
         root = self._resolve_bin_root()
         os_name = self._os_folder()
         arch = self._arch_folder()
 
+        # Prefer bundled rclone when available.
+        if name.lower() == "rclone":
+            for c in candidates:
+                bundled = root / name / os_name / arch / "bin" / c
+                if bundled.exists() and bundled.is_file():
+                    return str(bundled)
+
+        # PATH
+        for c in candidates:
+            p = shutil.which(c)
+            if p:
+                return p
+
+        # Bundled (fallback)
         for c in candidates:
             bundled = root / name / os_name / arch / "bin" / c
             if bundled.exists() and bundled.is_file():
                 return str(bundled)
 
-        # Last resort: return original name and let caller fail with a clearer message
         return candidates[0]
+
+    def _has_macfuse(self) -> bool:
+        """Return True if macFUSE appears to be installed on macOS.
+
+        macFUSE is a system component (filesystem extension) and is not a PATH executable,
+        so it cannot be bundled the same way as userland binaries.
+        """
+        if platform.system().lower() != "darwin":
+            return False
+
+        candidates = [
+            "/Library/Filesystems/macfuse.fs",
+            "/Library/Filesystems/osxfuse.fs",
+            "/usr/local/lib/libfuse.dylib",
+            "/opt/homebrew/lib/libfuse.dylib",
+        ]
+        return any(os.path.exists(p) for p in candidates)
 
     def _which_or_bin(self, name: str) -> Optional[str]:
         p = shutil.which(name)
