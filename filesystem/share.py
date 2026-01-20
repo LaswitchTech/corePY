@@ -333,6 +333,7 @@ class Share:
         timeout: int,
     ) -> None:
         # Prefer curlftpfs when available (Linux/macOS). Otherwise fallback to rclone.
+        self._log_debug("[Share] FTP mount: selecting backend")
         if self._is_windows():
             # Windows: use rclone as it supports FTP mounts cross-platform.
             self._mount_rclone("ftp", target, mount_point, auth, options, read_only, timeout)
@@ -352,9 +353,11 @@ class Share:
             if opt_str:
                 cmd += ["-o", opt_str]
 
+            self._log_debug(f"[Share] FTP mount backend: curlftpfs ({curlftpfs})")
             self._run(cmd, elevate=False, timeout=timeout)
             return
 
+        self._log_debug("[Share] FTP mount backend: rclone")
         # Fallback: rclone
         self._mount_rclone("ftp", target, mount_point, auth, options, read_only, timeout)
 
@@ -425,6 +428,15 @@ class Share:
         self._backend = "rclone"
         rclone = self._bin("rclone")
         self._log_debug(f"[Share] Using rclone binary: {rclone}")
+
+        # Homebrew's rclone on macOS cannot mount (FUSE mount support disabled).
+        # If the bundled binary was copied from Homebrew, we must fail fast with a clear message.
+        if self._rclone_is_homebrew_build(rclone):
+            raise ShareError(
+                "rclone mount is not supported on macOS when rclone is the Homebrew build. "
+                "Replace the bundled rclone with the official rclone binary from rclone.org/downloads "
+                "(and ensure macFUSE is installed), then retry."
+            )
 
         # rclone can mount using an on-the-fly remote definition:
         #   rclone mount ":ftp,host=example.com,user=u,pass=...,": /mnt
@@ -511,6 +523,13 @@ class Share:
                 except Exception:
                     out, err = "", ""
                 msg = (err or out or "").strip() or f"rclone exited with code {rc}"
+                msg_l = msg.lower()
+                if "installed via homebrew" in msg_l and "rclone mount is not supported" in msg_l:
+                    raise ShareError(
+                        "rclone mount failed because the Homebrew rclone build on macOS does not support mounts. "
+                        "Replace the bundled rclone with the official rclone binary from rclone.org/downloads "
+                        "(and ensure macFUSE is installed), then retry.\n\n" + msg
+                    )
                 raise ShareError(f"rclone mount failed: {msg}")
 
             # Check whether the mount point is actually mounted (OS view).
@@ -563,6 +582,42 @@ class Share:
     # ---------------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------------
+
+    def _rclone_is_homebrew_build(self, rclone_path: str) -> bool:
+        """Return True if the rclone binary appears to be the Homebrew build on macOS.
+
+        Homebrew's rclone is built without mount support on macOS (FUSE mount is disabled).
+        """
+        if platform.system().lower() != "darwin":
+            return False
+
+        p = (rclone_path or "").lower()
+        # Common Homebrew locations
+        if "/opt/homebrew" in p or "/usr/local" in p or "/cellar/" in p:
+            # This is a heuristic; verify via `rclone version` below.
+            pass
+
+        try:
+            completed = subprocess.run(
+                [rclone_path, "version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            return False
+
+        out = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        out_l = out.lower()
+        # Many Homebrew builds include "homebrew" in the version output.
+        if "homebrew" in out_l:
+            return True
+
+        # As a secondary heuristic, some official builds mention "rclone.org" in help/version.
+        # We don't treat absence as Homebrew, only positive match above.
+        return False
 
     def _run(self, cmd: List[str], *, elevate: bool, timeout: int) -> None:
         # `elevate` here is used only if caller explicitly wants it; we keep it as a hook.
