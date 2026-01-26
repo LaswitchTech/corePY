@@ -5,6 +5,7 @@ import sys
 import platform
 import subprocess
 
+from pathlib import Path
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
@@ -47,12 +48,20 @@ class Helper:
             if os.path.exists(p):
                 return p
 
-        # 3) macOS .app Resources
+        # 3) macOS .app Resources in onefile
+        if getattr(sys, "frozen", False) and self.get_os() == "macos":
+            # .../Replicator.app/Contents/MacOS/Replicator -> parents[1] = Contents
+            contents = Path(sys.executable).resolve().parents[1]
+            p = contents / "Resources" / rel
+            if p.exists():
+                return str(p)
+
+        # 4) macOS .app Resources
         res = os.path.join(self.root_dir, "Resources", rel)
         if os.path.exists(res):
             return res
 
-        # 4) repo src/
+        # 5) repo src/
         src = os.path.join(self.root_dir, "src", rel)
         if os.path.exists(src):
             return src
