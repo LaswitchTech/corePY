@@ -9,8 +9,11 @@ import time
 import signal
 import shutil
 import subprocess
+import platform
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
+from PyQt5.QtWidgets import QApplication
 
 
 @dataclass
@@ -61,6 +64,40 @@ class Service:
             # Persist any new defaults
             self._configuration.save()
 
+            # Service control buttons (shown/hidden dynamically)
+            self._configuration.add("service.actions.start", None, "button", label="Start Service", action=self.start)
+            self._configuration.add("service.actions.stop", None, "button", label="Stop Service", action=self.stop)
+            self._configuration.add("service.actions.restart", None, "button", label="Restart Service", action=self.restart)
+            self._configuration.add("service.actions.install", None, "button", label="Install Service", action=self.install)
+            self._configuration.add("service.actions.uninstall", None, "button", label="Uninstall Service", action=self.uninstall)
+
+            # Initial visibility update
+            self._refresh_action_visibility()
+
+            # Keep visibility in sync when configuration is saved/changed
+            try:
+                self._configuration.configChanged.connect(lambda _cfg: self._refresh_action_visibility())
+            except Exception:
+                pass
+    def _refresh_action_visibility(self) -> None:
+        """Show/hide configuration action buttons based on install/running state."""
+        if self._configuration is None:
+            return
+
+        installed = self._is_installed()
+        running = self._is_service_active() if installed else self._is_running()
+
+        # Start/Stop are mutually exclusive when installed; when not installed, start runs in-process.
+        self._configuration.visibility("service.actions.start", not running)
+        self._configuration.visibility("service.actions.stop", running)
+
+        # Restart only makes sense when running
+        self._configuration.visibility("service.actions.restart", running)
+
+        # Install/Uninstall are mutually exclusive
+        self._configuration.visibility("service.actions.install", not installed)
+        self._configuration.visibility("service.actions.uninstall", installed)
+
     # ------------------------------------------------------------------
     # CLI integration
     # ------------------------------------------------------------------
@@ -70,12 +107,12 @@ class Service:
         if cli is None:
             return
 
+        cli.add("status", "Show service status.", self.status)
         cli.add("start", "Start the service loop.", self.start)
         cli.add("stop", "Stop the running service.", self.stop)
         cli.add("restart", "Restart the running service.", self.restart)
-        cli.add("status", "Show service status.", self.status)
-        cli.add("install", "Install as a systemd service (Linux).", self.install)
-        cli.add("uninstall", "Uninstall the systemd service (Linux).", self.uninstall)
+        cli.add("install", "Install as a python service.", self.install)
+        cli.add("uninstall", "Uninstall the python service.", self.uninstall)
 
     # ------------------------------------------------------------------
     # Task registry
@@ -183,6 +220,12 @@ class Service:
         """Enter the service loop in the current process."""
         self._stop_requested = False
 
+        # If installed, delegate to platform service manager.
+        if self._is_installed():
+            self._service_manager_start()
+            self._refresh_action_visibility()
+            return
+
         # Apply configured loop sleep if available
         if self._configuration is not None:
             try:
@@ -211,6 +254,12 @@ class Service:
 
     def stop(self) -> None:
         """Stop a running service by signaling the PID from the pidfile."""
+        # If installed, delegate to platform service manager.
+        if self._is_installed():
+            self._service_manager_stop()
+            self._refresh_action_visibility()
+            return
+
         pid = self._read_pidfile()
         if not pid:
             self._log("Service is not running (no pidfile).", level="info")
@@ -231,7 +280,13 @@ class Service:
             self._cleanup_pidfile()
 
     def restart(self) -> None:
-        """Stop running service (if any), then start the loop."""
+        # If installed, delegate to platform service manager.
+        if self._is_installed():
+            self._service_manager_restart()
+            self._refresh_action_visibility()
+            return
+
+        # Otherwise run in-process restart
         self.stop()
         time.sleep(0.5)
         self.start()
@@ -241,12 +296,14 @@ class Service:
         pidfile = self._pidfile()
         pid = self._read_pidfile()
 
-        running = bool(pid and self._pid_exists(pid))
+        installed = self._is_installed()
+        running = self._is_service_active() if installed else bool(pid and self._pid_exists(pid))
 
         # Build a readable status
         lines = []
         lines.append(f"Service: {self._app_name()}")
         lines.append(f"PID file: {pidfile}")
+        lines.append(f"Installed: {'yes' if installed else 'no'}")
         lines.append(f"Running: {'yes' if running else 'no'}")
         if pid:
             lines.append(f"PID: {pid}")
@@ -295,17 +352,38 @@ class Service:
             time.sleep(self._loop_sleep)
 
     # ------------------------------------------------------------------
-    # systemd integration (Linux)
+    # systemd integration (Linux only)
     # ------------------------------------------------------------------
 
     def install(self) -> None:
-        """Install a systemd unit that runs `<python> <main.py> --start`.
+        # If running frozen (PyInstaller), service install is not supported by this helper.
+        if getattr(sys, "frozen", False):
+            raise NotImplementedError("Service install from a frozen .app/.exe is not supported")
 
-        This is intentionally Linux/systemd-only. On other platforms, raise.
-        """
         if sys.platform.startswith("win"):
-            raise NotImplementedError("systemd install is not supported on Windows")
+            self._install_windows_service()
+        elif sys.platform == "darwin":
+            self._install_macos_launchd()
+        else:
+            self._install_systemd()
 
+        self._refresh_action_visibility()
+
+    def uninstall(self) -> None:
+        if getattr(sys, "frozen", False):
+            raise NotImplementedError("Service uninstall from a frozen .app/.exe is not supported")
+
+        if sys.platform.startswith("win"):
+            self._uninstall_windows_service()
+        elif sys.platform == "darwin":
+            self._uninstall_macos_launchd()
+        else:
+            self._uninstall_systemd()
+
+        self._refresh_action_visibility()
+
+    def _install_systemd(self) -> None:
+        """Install a systemd unit that runs `<python> <main.py> --start`."""
         if shutil.which("systemctl") is None:
             raise RuntimeError("systemctl not found; systemd does not appear available")
 
@@ -332,10 +410,7 @@ class Service:
 
         print(f"Installed and started: {unit_path}")
 
-    def uninstall(self) -> None:
-        if sys.platform.startswith("win"):
-            raise NotImplementedError("systemd uninstall is not supported on Windows")
-
+    def _uninstall_systemd(self) -> None:
         if shutil.which("systemctl") is None:
             raise RuntimeError("systemctl not found; systemd does not appear available")
 
@@ -383,8 +458,6 @@ class Service:
     def _app_name(self) -> str:
         # Try to read from Qt application if present, else fallback.
         try:
-            from PyQt5.QtWidgets import QApplication
-
             inst = QApplication.instance()
             if inst and inst.applicationName():
                 return inst.applicationName()
@@ -447,3 +520,205 @@ class Service:
             signal.signal(signal.SIGINT, _handler)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Cross-platform service manager helpers
+    # ------------------------------------------------------------------
+
+    def _service_label(self) -> str:
+        # Use a stable label for OS service registration
+        name = self._app_name() or "corepy"
+        safe = "".join(c if c.isalnum() or c in ("-", "_", ".") else "-" for c in name)
+        return safe
+
+    def _entry_command(self) -> tuple[str, str, str]:
+        """Return (python_exe, entrypoint, working_dir) for service registration."""
+        python_exe = sys.executable
+        entry = os.path.abspath(sys.argv[0])
+        workdir = os.path.dirname(entry)
+        return python_exe, entry, workdir
+
+    def _is_installed(self) -> bool:
+        """Best-effort check whether this app is installed as a service."""
+        try:
+            if sys.platform.startswith("win"):
+                name = self._service_label()
+                # sc query returns non-zero if missing
+                r = subprocess.run(["sc", "query", name], capture_output=True, text=True)
+                return r.returncode == 0
+            if sys.platform == "darwin":
+                return self._macos_plist_path().exists()
+            # linux
+            if shutil.which("systemctl") is None:
+                return False
+            service_name = f"{self._service_label()}.service"
+            r = subprocess.run(["systemctl", "is-enabled", service_name], capture_output=True, text=True)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _is_service_active(self) -> bool:
+        """Check if the installed service is running (best-effort)."""
+        try:
+            if sys.platform.startswith("win"):
+                name = self._service_label()
+                r = subprocess.run(["sc", "query", name], capture_output=True, text=True)
+                if r.returncode != 0:
+                    return False
+                out = (r.stdout or "") + (r.stderr or "")
+                return "RUNNING" in out.upper()
+            if sys.platform == "darwin":
+                label = self._service_label()
+                # launchctl print is a good indicator when loaded
+                r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
+                return r.returncode == 0
+            # linux
+            if shutil.which("systemctl") is None:
+                return False
+            service_name = f"{self._service_label()}.service"
+            r = subprocess.run(["systemctl", "is-active", service_name], capture_output=True, text=True)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _service_manager_start(self) -> None:
+        label = self._service_label()
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.run(["sc", "start", label], check=False)
+                self._log(f"Requested start for Windows service: {label}")
+                return
+            if sys.platform == "darwin":
+                plist = self._macos_plist_path()
+                if plist.exists():
+                    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)], check=False)
+                    subprocess.run(["launchctl", "enable", f"gui/{os.getuid()}/{label}"], check=False)
+                    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"], check=False)
+                self._log(f"Requested start for launchd agent: {label}")
+                return
+            # linux
+            service_name = f"{label}.service"
+            subprocess.run(["systemctl", "start", service_name], check=False)
+            self._log(f"Requested start for systemd service: {service_name}")
+        except Exception as e:
+            self._log(f"Failed to start service via manager: {e}", level="error")
+
+    def _service_manager_stop(self) -> None:
+        label = self._service_label()
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.run(["sc", "stop", label], check=False)
+                self._log(f"Requested stop for Windows service: {label}")
+                return
+            if sys.platform == "darwin":
+                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], check=False)
+                self._log(f"Requested stop for launchd agent: {label}")
+                return
+            service_name = f"{label}.service"
+            subprocess.run(["systemctl", "stop", service_name], check=False)
+            self._log(f"Requested stop for systemd service: {service_name}")
+        except Exception as e:
+            self._log(f"Failed to stop service via manager: {e}", level="error")
+
+    def _service_manager_restart(self) -> None:
+        label = self._service_label()
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.run(["sc", "stop", label], check=False)
+                time.sleep(0.5)
+                subprocess.run(["sc", "start", label], check=False)
+                self._log(f"Requested restart for Windows service: {label}")
+                return
+            if sys.platform == "darwin":
+                subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"], check=False)
+                self._log(f"Requested restart for launchd agent: {label}")
+                return
+            service_name = f"{label}.service"
+            subprocess.run(["systemctl", "restart", service_name], check=False)
+            self._log(f"Requested restart for systemd service: {service_name}")
+        except Exception as e:
+            self._log(f"Failed to restart service via manager: {e}", level="error")
+
+    # ------------------------------------------------------------------
+    # Windows service install/uninstall (sc.exe)
+    # ------------------------------------------------------------------
+
+    def _install_windows_service(self) -> None:
+        name = self._service_label()
+        python_exe, entry, workdir = self._entry_command()
+
+        # binPath must be a single string; include working directory by using cmd.exe /c cd ... && ...
+        cmd = f'cmd.exe /c "cd /d {workdir} && \\"{python_exe}\\" \\"{entry}\\" --start"'
+
+        # Create service (requires admin)
+        r = subprocess.run(["sc", "create", name, f"binPath=", cmd, "start=", "auto"], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"sc create failed: {(r.stdout or '') + (r.stderr or '')}")
+
+        self._log(f"Installed Windows service: {name}")
+
+    def _uninstall_windows_service(self) -> None:
+        name = self._service_label()
+        subprocess.run(["sc", "stop", name], check=False)
+        r = subprocess.run(["sc", "delete", name], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"sc delete failed: {(r.stdout or '') + (r.stderr or '')}")
+        self._log(f"Uninstalled Windows service: {name}")
+
+    # ------------------------------------------------------------------
+    # macOS launchd install/uninstall (per-user LaunchAgent)
+    # ------------------------------------------------------------------
+
+    def _macos_plist_path(self) -> Path:
+        # Per-user agent (no root required)
+        return Path.home() / "Library" / "LaunchAgents" / f"{self._service_label()}.plist"
+
+    def _install_macos_launchd(self) -> None:
+        label = self._service_label()
+        python_exe, entry, workdir = self._entry_command()
+        plist_path = self._macos_plist_path()
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Simple LaunchAgent; keep it alive, run at load.
+        plist = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\">\n"
+            "<dict>\n"
+            f"  <key>Label</key><string>{label}</string>\n"
+            "  <key>ProgramArguments</key>\n"
+            "  <array>\n"
+            f"    <string>{python_exe}</string>\n"
+            f"    <string>{entry}</string>\n"
+            "    <string>--start</string>\n"
+            "  </array>\n"
+            f"  <key>WorkingDirectory</key><string>{workdir}</string>\n"
+            "  <key>RunAtLoad</key><true/>\n"
+            "  <key>KeepAlive</key><true/>\n"
+            "  <key>StandardOutPath</key><string>~/Library/Logs/Replicator/service.out.log</string>\n"
+            "  <key>StandardErrorPath</key><string>~/Library/Logs/Replicator/service.err.log</string>\n"
+            "</dict>\n"
+            "</plist>\n"
+        )
+
+        plist_path.write_text(plist, encoding="utf-8")
+
+        # Load into the current user's launchd
+        subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)], check=False)
+        subprocess.run(["launchctl", "enable", f"gui/{os.getuid()}/{label}"], check=False)
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"], check=False)
+
+        self._log(f"Installed launchd LaunchAgent: {plist_path}")
+
+    def _uninstall_macos_launchd(self) -> None:
+        label = self._service_label()
+        plist_path = self._macos_plist_path()
+
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], check=False)
+        if plist_path.exists():
+            try:
+                plist_path.unlink()
+            except Exception:
+                pass
+
+        self._log(f"Uninstalled launchd LaunchAgent: {label}")
