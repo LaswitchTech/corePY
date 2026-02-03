@@ -292,8 +292,9 @@ class Configuration(QObject):
     # ------------------------------------------------------------------
 
     def cli(self, cli: QApplication = None) -> None:
-        cli.add("config.import", "Import configuration from the given file.", self.import_from_path, args=1, arg_names=["<path>"])
-        cli.add("config.provision", "Contact the provisioning server and import the returned configuration.", self.provision)
+        # cli.add("config.import", "Import configuration from the given file.", self.import_from_path, args=1, arg_names=["<path>"])
+        # cli.add("config.provision", "Contact the provisioning server and import the returned configuration.", self.provision)
+        pass
 
     # ------------------------------------------------------------------
     # UI dialog builder
