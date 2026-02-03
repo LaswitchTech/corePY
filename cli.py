@@ -96,7 +96,8 @@ class CommandLine(QApplication):
         entries: list[tuple[str, str]] = []
 
         # Build usage strings including required arguments
-        for cmd, info in sorted(self._commands.items()):
+        # Preserve insertion order (the order commands were added)
+        for cmd, info in self._commands.items():
             desc = info.get("description", "") or ""
             args_required = info.get("args_required", 0) or 0
             arg_names = info.get("arg_names") or []
