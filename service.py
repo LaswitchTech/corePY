@@ -99,12 +99,12 @@ class Service:
         if cli is None:
             return
 
-        cli.add("status", "Show service status.", self.status)
-        cli.add("start", "Start the service loop.", self.start)
-        cli.add("stop", "Stop the running service.", self.stop)
-        cli.add("restart", "Restart the running service.", self.restart)
-        cli.add("install", "Install as a python service.", self.install)
-        cli.add("uninstall", "Uninstall the python service.", self.uninstall)
+        cli.add("service.status", "Show service status.", self.status)
+        cli.add("service.start", "Start the service loop.", self.start)
+        cli.add("service.stop", "Stop the running service.", self.stop)
+        cli.add("service.restart", "Restart the running service.", self.restart)
+        cli.add("service.install", "Install as a python service.", self.install)
+        cli.add("service.uninstall", "Uninstall the python service.", self.uninstall)
 
     # ------------------------------------------------------------------
     # Task registry
