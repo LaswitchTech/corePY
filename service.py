@@ -562,10 +562,62 @@ class Service:
         return safe or "com.corepy.corepy"
 
     def _entry_command(self) -> tuple[str, str, str]:
-        """Return (python_exe, entrypoint, working_dir) for service registration."""
+        """Return (python_exe, entrypoint, working_dir) for service registration.
+
+        Notes:
+        - When `sys.argv[0]` is a relative path and the current working directory
+          is already inside `src/`, it's easy to end up with paths like `src/src/main.py`.
+        - launchd will happily try to execute that path, but the process will fail.
+
+        This helper resolves the path and applies a small normalization pass.
+        """
         python_exe = sys.executable
-        entry = os.path.abspath(sys.argv[0])
-        workdir = os.path.dirname(entry)
+
+        # Resolve argv[0] robustly (handles relative paths)
+        try:
+            p = Path(sys.argv[0]).expanduser()
+            entry_path = (p if p.is_absolute() else (Path.cwd() / p)).resolve()
+        except Exception:
+            entry_path = Path(os.path.abspath(sys.argv[0]))
+
+        def _dedupe_consecutive(parts: list[str]) -> list[str]:
+            out: list[str] = []
+            for seg in parts:
+                if out and out[-1] == seg:
+                    continue
+                out.append(seg)
+            return out
+
+        # If we ended up with duplicated segments like .../src/src/..., collapse them.
+        parts = list(entry_path.parts)
+        deduped = Path(*_dedupe_consecutive(parts))
+
+        # Prefer the deduped version if it exists.
+        if deduped.exists():
+            entry_path = deduped
+        else:
+            # Common case: /.../src/src/main.py -> /.../src/main.py
+            # If the path contains two consecutive 'src' segments, drop one.
+            if "src" in parts:
+                try:
+                    new_parts: list[str] = []
+                    i = 0
+                    while i < len(parts):
+                        if i + 1 < len(parts) and parts[i] == parts[i + 1]:
+                            # Drop the duplicate segment
+                            new_parts.append(parts[i])
+                            i += 2
+                            continue
+                        new_parts.append(parts[i])
+                        i += 1
+                    candidate = Path(*new_parts)
+                    if candidate.exists():
+                        entry_path = candidate
+                except Exception:
+                    pass
+
+        entry = str(entry_path)
+        workdir = str(entry_path.parent)
         return python_exe, entry, workdir
 
     def _is_installed(self) -> bool:
@@ -620,10 +672,24 @@ class Service:
                 return
             if sys.platform == "darwin":
                 plist = self._macos_plist_path()
-                if plist.exists():
-                    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)], check=False)
-                    subprocess.run(["launchctl", "enable", f"gui/{os.getuid()}/{label}"], check=False)
-                    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"], check=False)
+                domain = f"gui/{os.getuid()}"
+                target = f"{domain}/{label}"
+
+                # If it's already loaded, bootstrap may fail with error 5.
+                already_loaded = False
+                try:
+                    r = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+                    already_loaded = (r.returncode == 0)
+                except Exception:
+                    already_loaded = False
+
+                if plist.exists() and not already_loaded:
+                    subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=False)
+
+                # Enable + kickstart regardless (these are safe even if already loaded)
+                subprocess.run(["launchctl", "enable", target], check=False)
+                subprocess.run(["launchctl", "kickstart", "-k", target], check=False)
+
                 self._log(f"Requested start for launchd agent: {label}")
                 return
             # linux
