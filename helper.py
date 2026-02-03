@@ -31,7 +31,29 @@ class Helper:
 
         self.home_dir = os.path.expanduser("~")
 
-    def get_path(self, rel_path: str) -> str | None:
+    def get_path(self, rel_path: str, type: str = "SYS") -> str | None:
+        """
+        Locate a resource file according to the specified type.
+        Wrapper around get_sys_path, get_config_path, get_data_path.
+
+        Types:
+        - SYS: Search in standard system locations (PyInstaller, .app Resources, src/)
+        - CONFIG: User configuration directory
+        - DATA: User data directory
+        """
+        rel = rel_path.replace("\\", "/")
+
+        if type.upper() == "SYS":
+            return self.get_sys_path(rel)
+        elif type.upper() == "CONFIG":
+            return self.get_config_path(rel)
+        elif type.upper() == "DATA":
+            return self.get_data_path(rel)
+        else:
+            print(f"[Helper] Unknown path type: {type}")
+            return None
+
+    def get_sys_path(self, rel_path: str) -> str | None:
         rel = rel_path.replace("\\", "/")
 
         # 1) PyInstaller onefile temp dir
