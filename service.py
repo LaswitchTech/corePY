@@ -60,6 +60,9 @@ class Service:
             self._configuration.add("service.loopSleep", 1, "number", label="Service loop sleep (s)", min=1, max=60)
             # Default interval used when registering tasks (seconds)
             self._configuration.add("service.defaultInterval", 3600, "number", label="Service default task interval (s)", min=1, max=86400)
+            # Reverse-DNS prefix used to name/register the service (e.g. com.laswitchtech)
+            # The final label becomes: <domain>.<appname> (lowercased and sanitized)
+            self._configuration.add("service.domain", "com.corepy", "text", label="Service domain (reverse DNS)")
             # Persist any new defaults
             self._configuration.save()
 
@@ -71,6 +74,27 @@ class Service:
                 self._configuration.configChanged.connect(lambda _cfg: self._refresh_action_visibility())
             except Exception:
                 pass
+    def _service_domain(self) -> str:
+        """Return reverse-DNS domain used for service labels.
+
+        Prefer configuration key `service.domain` when available; fall back to
+        an environment override COREPY_SERVICE_DOMAIN; then to 'com.corepy'.
+        """
+        # 1) Configuration
+        try:
+            if self._configuration is not None:
+                v = (self._configuration.get("service.domain", "") or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+        # 2) Environment override
+        v = (os.environ.get("COREPY_SERVICE_DOMAIN") or "").strip()
+        if v:
+            return v
+
+        return "com.corepy"
     def _refresh_action_visibility(self) -> None:
         """Show/hide configuration action buttons based on install/running state."""
         if self._configuration is None:
@@ -518,10 +542,24 @@ class Service:
     # ------------------------------------------------------------------
 
     def _service_label(self) -> str:
-        # Use a stable label for OS service registration
-        name = self._app_name() or "corepy"
-        safe = "".join(c if c.isalnum() or c in ("-", "_", ".") else "-" for c in name)
-        return safe
+        """Stable label used for OS service registration.
+
+        - macOS launchd prefers reverse-DNS labels.
+        - Windows 'sc' service names and systemd unit names also benefit from stability.
+
+        Result: <domain>.<appname> (lowercased and sanitized)
+        """
+        domain = (self._service_domain() or "com.corepy").strip().strip(".")
+        app = (self._app_name() or "corepy").strip()
+
+        base = f"{domain}.{app}" if domain else app
+        base = base.lower()
+
+        # Keep only characters typically safe across platforms; replace others with '-'
+        safe = "".join(c if c.isalnum() or c in ("-", "_", ".") else "-" for c in base)
+        # Avoid accidental leading/trailing dots
+        safe = safe.strip(".")
+        return safe or "com.corepy.corepy"
 
     def _entry_command(self) -> tuple[str, str, str]:
         """Return (python_exe, entrypoint, working_dir) for service registration."""
@@ -670,6 +708,9 @@ class Service:
         python_exe, entry, workdir = self._entry_command()
         plist_path = self._macos_plist_path()
         plist_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure logs directory exists
+        logs_dir = Path.home() / "Library" / "Logs" / self._app_name()
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Simple LaunchAgent; keep it alive, run at load.
         plist = (
@@ -687,8 +728,8 @@ class Service:
             f"  <key>WorkingDirectory</key><string>{workdir}</string>\n"
             "  <key>RunAtLoad</key><true/>\n"
             "  <key>KeepAlive</key><true/>\n"
-            "  <key>StandardOutPath</key><string>~/Library/Logs/Replicator/service.out.log</string>\n"
-            "  <key>StandardErrorPath</key><string>~/Library/Logs/Replicator/service.err.log</string>\n"
+            f"  <key>StandardOutPath</key><string>{Path.home() / 'Library' / 'Logs' / self._app_name() / 'service.out.log'}</string>\n"
+            f"  <key>StandardErrorPath</key><string>{Path.home() / 'Library' / 'Logs' / self._app_name() / 'service.err.log'}</string>\n"
             "</dict>\n"
             "</plist>\n"
         )
