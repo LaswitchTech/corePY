@@ -750,40 +750,16 @@ class Configuration(QObject):
             self.set(key, value)
 
     def _get_config_dir(self) -> str:
-        # Legacy default (macOS, Windows, etc.)
-        default_dir = os.path.join(self.root_dir, "config")
+        """Return the directory used to store configuration files.
 
-        # Try to get OS name from helper to stay consistent with Application
+        Prefer Helper.get_config_path() (new, OS-appropriate location).
+        Fall back to the legacy project-root `config/` directory if the
+        helper doesn't provide get_config_path().
+        """
+        # Preferred: OS-appropriate config directory via Helper
         try:
-            os_name = self._helper.get_os()
+            # Let Helper resolve the app name (or use the QApplication name)
+            return self._helper.get_config_path(ensure=True)
         except Exception:
-            os_name = None
-
-        # Only change behavior on Linux and when we have an application name
-        if os_name == "linux":
-            app_name = ""
-
-            # If we have an Application instance, try to use its name
-            if self._app is not None:
-                try:
-                    # Prefer the Application.name property if available
-                    if hasattr(self._app, "name"):
-                        app_name = self._app.name  # type: ignore[attr-defined]
-                    else:
-                        app_name = self._app.applicationName()
-                except Exception:
-                    app_name = ""
-
-            # In CLI usage there may be no Application; fall back to the root_dir name
-            if not app_name:
-                try:
-                    app_name = os.path.basename(self.root_dir) or ""
-                except Exception:
-                    app_name = ""
-
-            if app_name:
-                home = os.path.expanduser("~")
-                if home:
-                    return os.path.join(home, ".config", app_name)
-
-        return default_dir
+            # Legacy fallback (kept for backward compatibility)
+            return os.path.join(self.root_dir, "config")
