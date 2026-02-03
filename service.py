@@ -236,8 +236,10 @@ class Service:
         """Enter the service loop in the current process."""
         self._stop_requested = False
 
-        # If installed, delegate to platform service manager.
-        if self._is_installed():
+        # If installed, either:
+        # - We are a *manager* request (user invoked --start): delegate to OS manager, OR
+        # - We are the *service process* (OS invoked --start): run the loop in-process.
+        if self._is_installed() and not self._running_under_service_manager():
             self._service_manager_start()
             self._refresh_action_visibility()
             return
@@ -456,6 +458,8 @@ class Service:
             "After=network.target\n\n"
             "[Service]\n"
             "Type=simple\n"
+            "Environment=COREPY_RUN_AS_SERVICE=1\n"
+            f"Environment=COREPY_SERVICE_LABEL={self._service_label()}\n"
             f"WorkingDirectory={working_dir}\n"
             f"ExecStart={python_exe} {entrypoint} --start\n"
             f"ExecStop={python_exe} {entrypoint} --stop\n"
@@ -466,6 +470,34 @@ class Service:
             "[Install]\n"
             "WantedBy=multi-user.target\n"
         )
+    def _running_under_service_manager(self) -> bool:
+        """Return True if this process should run the service loop.
+
+        When installed, `start()` is used both to *request* the service manager to
+        start the job and as the entrypoint that the service manager executes.
+
+        We differentiate the two cases using an explicit env flag set by the
+        service definitions (launchd/systemd/Windows), plus a couple of platform
+        hints as fallback.
+        """
+        # Explicit flag (preferred)
+        flag = (os.environ.get("COREPY_RUN_AS_SERVICE") or "").strip().lower()
+        if flag in ("1", "true", "yes", "on"):
+            return True
+
+        # Fallback hints
+        if sys.platform == "darwin":
+            # launchd commonly sets this for jobs
+            xpc = (os.environ.get("XPC_SERVICE_NAME") or "").strip()
+            if xpc and xpc == self._service_label():
+                return True
+
+        if not sys.platform.startswith("win"):
+            # systemd sets INVOCATION_ID for services
+            if os.environ.get("INVOCATION_ID"):
+                return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Internals
@@ -651,9 +683,21 @@ class Service:
                 return "RUNNING" in out.upper()
             if sys.platform == "darwin":
                 label = self._service_label()
-                # launchctl print is a good indicator when loaded
                 r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, text=True)
-                return r.returncode == 0
+                if r.returncode != 0:
+                    return False
+                out = (r.stdout or "") + (r.stderr or "")
+                o = out.lower()
+                # Typical indicators in `launchctl print` output
+                if "job state = running" in o:
+                    return True
+                if "state = running" in o:
+                    return True
+                # If explicitly exited, consider not running
+                if "job state = exited" in o:
+                    return False
+                # Fallback: loaded but ambiguous => treat as active
+                return True
             # linux
             if shutil.which("systemctl") is None:
                 return False
@@ -744,7 +788,11 @@ class Service:
         python_exe, entry, workdir = self._entry_command()
 
         # binPath must be a single string; include working directory by using cmd.exe /c cd ... && ...
-        cmd = f'cmd.exe /c "cd /d {workdir} && \\"{python_exe}\\" \\"{entry}\\" --start"'
+        cmd = (
+            f'cmd.exe /c "set COREPY_RUN_AS_SERVICE=1 && '
+            f'set COREPY_SERVICE_LABEL={name} && '
+            f'cd /d {workdir} && \\"{python_exe}\\" \\"{entry}\\" --start"'
+        )
 
         # Create service (requires admin)
         r = subprocess.run(["sc", "create", name, f"binPath=", cmd, "start=", "auto"], capture_output=True, text=True)
@@ -792,6 +840,11 @@ class Service:
             "    <string>--start</string>\n"
             "  </array>\n"
             f"  <key>WorkingDirectory</key><string>{workdir}</string>\n"
+            "  <key>EnvironmentVariables</key>\n"
+            "  <dict>\n"
+            "    <key>COREPY_RUN_AS_SERVICE</key><string>1</string>\n"
+            f"    <key>COREPY_SERVICE_LABEL</key><string>{label}</string>\n"
+            "  </dict>\n"
             "  <key>RunAtLoad</key><true/>\n"
             "  <key>KeepAlive</key><true/>\n"
             f"  <key>StandardOutPath</key><string>{Path.home() / 'Library' / 'Logs' / self._app_name() / 'service.out.log'}</string>\n"
