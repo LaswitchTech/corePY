@@ -56,20 +56,12 @@ class Service:
 
         # Service configuration defaults
         if self._configuration is not None:
-            print("Initializing service configuration defaults...")
             # How often the main loop wakes up to check due tasks (seconds)
             self._configuration.add("service.loopSleep", 1, "number", label="Service loop sleep (s)", min=1, max=60)
             # Default interval used when registering tasks (seconds)
             self._configuration.add("service.defaultInterval", 3600, "number", label="Service default task interval (s)", min=1, max=86400)
             # Persist any new defaults
             self._configuration.save()
-
-            # Service control buttons (shown/hidden dynamically)
-            self._configuration.add("service.actions.start", None, "button", label="Start Service", action=self.start)
-            self._configuration.add("service.actions.stop", None, "button", label="Stop Service", action=self.stop)
-            self._configuration.add("service.actions.restart", None, "button", label="Restart Service", action=self.restart)
-            self._configuration.add("service.actions.install", None, "button", label="Install Service", action=self.install)
-            self._configuration.add("service.actions.uninstall", None, "button", label="Uninstall Service", action=self.uninstall)
 
             # Initial visibility update
             self._refresh_action_visibility()
