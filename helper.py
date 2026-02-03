@@ -6,7 +6,6 @@ import platform
 import subprocess
 
 from pathlib import Path
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
 class Helper:
@@ -68,6 +67,112 @@ class Helper:
 
         print(f"[Helper] Could not find resource: {rel}")
         return None
+
+    def _get_app_name(self, app_name: str | None = None) -> str:
+        """Resolve the application name used for user directories."""
+        if app_name:
+            name = str(app_name).strip()
+            if name:
+                return name
+
+        # Prefer QApplication name when running with a Qt app
+        try:
+            qapp = QApplication.instance()
+            if qapp:
+                qname = (qapp.applicationName() or "").strip()
+                if qname:
+                    return qname
+        except Exception:
+            pass
+
+        # Fallback: executable/script name
+        try:
+            base = os.path.basename(sys.executable if getattr(sys, "frozen", False) else sys.argv[0])
+            name = os.path.splitext(base)[0].strip()
+            return name or "app"
+        except Exception:
+            return "app"
+
+    def get_data_path(
+        self,
+        rel_path: str | None = None,
+        app_name: str | None = None,
+        ensure: bool = True,
+    ) -> str:
+        """Return the OS-appropriate directory for user *data*.
+
+        - Windows: %LOCALAPPDATA%\<AppName>
+        - macOS: ~/Library/Application Support/<AppName>
+        - Linux: $XDG_DATA_HOME/<AppName> (fallback ~/.local/share/<AppName>)
+
+        If `rel_path` is provided, it is appended under the app directory.
+        If `ensure` is True, the directory is created.
+        """
+        name = self._get_app_name(app_name)
+        os_name = self.get_os()
+
+        if os_name == "windows":
+            base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or self.home_dir
+            root = Path(base) / name
+        elif os_name == "macos":
+            root = Path(self.home_dir) / "Library" / "Application Support" / name
+        else:
+            xdg = os.environ.get("XDG_DATA_HOME")
+            if xdg:
+                root = Path(xdg) / name
+            else:
+                root = Path(self.home_dir) / ".local" / "share" / name
+
+        if rel_path:
+            rel = rel_path.replace("\\", "/").lstrip("/")
+            root = root / rel
+
+        if ensure:
+            # If rel_path includes a filename, create parent; otherwise create dir
+            target_dir = root.parent if root.suffix else root
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        return str(root)
+
+    def get_config_path(
+        self,
+        rel_path: str | None = None,
+        app_name: str | None = None,
+        ensure: bool = True,
+    ) -> str:
+        """Return the OS-appropriate directory for user *configuration*.
+
+        - Windows: %APPDATA%\<AppName>
+        - macOS: ~/Library/Preferences/<AppName>
+        - Linux: $XDG_CONFIG_HOME/<AppName> (fallback ~/.config/<AppName>)
+
+        If `rel_path` is provided, it is appended under the app directory.
+        If `ensure` is True, the directory is created.
+        """
+        name = self._get_app_name(app_name)
+        os_name = self.get_os()
+
+        if os_name == "windows":
+            base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or self.home_dir
+            root = Path(base) / name
+        elif os_name == "macos":
+            root = Path(self.home_dir) / "Library" / "Preferences" / name
+        else:
+            xdg = os.environ.get("XDG_CONFIG_HOME")
+            if xdg:
+                root = Path(xdg) / name
+            else:
+                root = Path(self.home_dir) / ".config" / name
+
+        if rel_path:
+            rel = rel_path.replace("\\", "/").lstrip("/")
+            root = root / rel
+
+        if ensure:
+            target_dir = root.parent if root.suffix else root
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        return str(root)
 
     @staticmethod
     def get_os() -> str:
