@@ -134,7 +134,7 @@ class Helper:
             system -> %PROGRAMDATA%\\<AppName>
         - macOS:
             user   -> ~/Library/Application Support/<AppName>
-            system -> /Library/Application Support/<AppName>
+            system -> ~/Library/Application Support/<AppName>
         - Linux:
             user   -> $XDG_DATA_HOME/<AppName> (fallback ~/.local/share/<AppName>)
             system -> /var/lib/<AppName>
@@ -163,10 +163,11 @@ class Helper:
                 base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or self.home_dir
                 root = Path(base) / name
         elif os_name == "macos":
-            if resolved_scope == "system":
-                root = Path("/Library") / "Application Support" / name
-            else:
-                root = Path(self.home_dir) / "Library" / "Application Support" / name
+            # if resolved_scope == "system":
+            #     root = Path("/Library") / "Application Support" / name
+            # else:
+            #     root = Path(self.home_dir) / "Library" / "Application Support" / name
+            root = Path(self.home_dir) / "Library" / "Application Support" / name
         else:
             if resolved_scope == "system":
                 root = Path("/var") / "lib" / name
