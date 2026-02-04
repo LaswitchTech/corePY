@@ -69,7 +69,7 @@ class Log:
 
         # ---------- file persistence ----------
         # Save log lines to disk under <project_root>/log/
-        self._log_dir = os.path.join(self._helper.root_dir, "log")
+        self._log_dir = self._helper.get_data_path("log",scope="system")
         try:
             os.makedirs(self._log_dir, exist_ok=True)
         except Exception:
@@ -241,7 +241,7 @@ class Log:
                     icon="info",
                     buttons="OK",
                     default="OK",
-                    icon_lookup_fn=self._helper.get_path,
+                    icon_lookup_fn=self._helper.get_sys_path,
                 )
                 return
 
@@ -260,7 +260,7 @@ class Log:
                     icon="info",
                     buttons="OK",
                     default="OK",
-                    icon_lookup_fn=self._helper.get_path,
+                    icon_lookup_fn=self._helper.get_sys_path,
                 )
                 return
 
@@ -359,7 +359,6 @@ class LogDialog(QDialog):
         self.apply_filter()
 
     def _copy_all(self):
-        from PyQt5.QtWidgets import QApplication
         QApplication.clipboard().setText(self.text.toPlainText())
 
     def save_as(self):

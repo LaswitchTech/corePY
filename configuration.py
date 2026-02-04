@@ -759,7 +759,7 @@ class Configuration(QObject):
         # Preferred: OS-appropriate config directory via Helper
         try:
             # Let Helper resolve the app name (or use the QApplication name)
-            return self._helper.get_config_path(ensure=True)
+            return self._helper.get_config_path(ensure=True, scope="system")
         except Exception:
             # Legacy fallback (kept for backward compatibility)
             return os.path.join(self.root_dir, "config")
