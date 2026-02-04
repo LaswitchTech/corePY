@@ -10,6 +10,7 @@ import signal
 import shutil
 import subprocess
 import platform
+import ctypes
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -567,6 +568,49 @@ class Service:
         except Exception:
             pass
 
+
+    # ------------------------------------------------------------------
+    # Windows elevation helpers
+    # ------------------------------------------------------------------
+
+    def _windows_is_admin(self) -> bool:
+        """Return True if the current process has admin rights on Windows."""
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+
+    def _windows_relaunch_elevated(self, argv: list[str]) -> bool:
+        """Relaunch the current executable with UAC elevation.
+
+        Returns True if the elevation prompt was successfully triggered.
+        """
+        if not sys.platform.startswith("win"):
+            return False
+
+        # Avoid infinite loops if something goes wrong.
+        if (os.environ.get("COREPY_ELEVATED_RELAUNCH") or "").strip() == "1":
+            return False
+
+        try:
+            # Build argument string for ShellExecuteW.
+            # Use subprocess.list2cmdline to quote correctly for Windows.
+            args = list(argv[1:]) + ["--elevated-relaunch"]
+            params = subprocess.list2cmdline(args)
+
+            # Pass a marker to the elevated process.
+            # We cannot reliably set environment variables via ShellExecute,
+            # so we append an internal flag and also set an env var for same-process codepaths.
+            os.environ["COREPY_ELEVATED_RELAUNCH"] = "1"
+
+            # 1 = SW_SHOWNORMAL
+            rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", argv[0], params, None, 1)
+            return int(rc) > 32
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Cross-platform service manager helpers
     # ------------------------------------------------------------------
@@ -784,6 +828,14 @@ class Service:
     def _install_windows_service(self) -> None:
         name = self._service_label()
 
+        # Installing a Windows service requires elevation. We cannot elevate an
+        # already-running process; instead, we relaunch with UAC and return.
+        if not self._windows_is_admin():
+            self._log("Admin privileges required to install the service. Requesting elevation...", level="info")
+            if self._windows_relaunch_elevated(sys.argv):
+                return
+            raise RuntimeError("Admin privileges required to install the service.")
+
         program, argv, workdir = self._service_command("start")
 
         # binPath must be a single string; include working directory by using cmd.exe /c cd ... && ...
@@ -813,6 +865,12 @@ class Service:
 
     def _uninstall_windows_service(self) -> None:
         name = self._service_label()
+        # Uninstalling a Windows service requires elevation.
+        if not self._windows_is_admin():
+            self._log("Admin privileges required to uninstall the service. Requesting elevation...", level="info")
+            if self._windows_relaunch_elevated(sys.argv):
+                return
+            raise RuntimeError("Admin privileges required to uninstall the service.")
         subprocess.run(["sc", "stop", name], check=False)
         r = subprocess.run(["sc", "delete", name], capture_output=True, text=True)
         if r.returncode != 0:
