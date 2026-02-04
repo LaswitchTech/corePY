@@ -911,13 +911,14 @@ log "Updating pip..."
 python -m pip install --upgrade pip wheel
 
 log "Installing build dependencies..."
-python -m pip install "pyinstaller>=6.9,<7" "sip>=6.9,<7"
+python -m pip install "pyinstaller>=6.9,<7"
 
 # PyInstaller on Windows requires .ico (or Pillow for automatic conversion from .png).
 # Install Pillow when building on Windows so we can safely use .png icons or generate .ico.
 if [ "$OS" = "windows" ]; then
   python -m pip install "pillow>=10,<12" || true
 fi
+
 
 # Optional: system PyQt5 on Linux ARM (APT)
 if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
@@ -935,6 +936,32 @@ else
   # Default: wheels
   # (Only install PyQt5 if the project uses it; safe to install regardless.)
   python -m pip install "PyQt5>=5.15,<6" || true
+fi
+
+# Ensure SIP bindings are bundled for PyQt5.
+# Note: the importable module is typically `PyQt5.sip` (not `sip`).
+# PyInstaller may still emit a non-fatal warning about hidden import "sip" depending on hooks.
+has_pyqt5=0
+if python -c "import importlib.util; import sys; sys.exit(0 if importlib.util.find_spec('PyQt5') else 1)" >/dev/null 2>&1; then
+  has_pyqt5=1
+fi
+
+if [ "$has_pyqt5" -eq 1 ]; then
+  # Add PyQt5.sip unless the user already provided it.
+  found=0
+  for h in "${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}"; do
+    [ "$h" = "PyQt5.sip" ] && found=1
+  done
+  if [ "$found" -eq 0 ]; then
+    HIDDEN_IMPORTS+=("PyQt5.sip")
+  fi
+
+  # If the user ever provided `sip`, normalize it early.
+  for i in "${!HIDDEN_IMPORTS[@]}"; do
+    if [ "${HIDDEN_IMPORTS[$i]}" = "sip" ]; then
+      HIDDEN_IMPORTS[$i]="PyQt5.sip"
+    fi
+  done
 fi
 
 # -----------------------------------------------------------------------------
