@@ -126,6 +126,10 @@ Options:
   --clean                    Remove build/dist artifacts before building
   --debug-pyi                Enable PyInstaller debug output (--log-level=DEBUG --debug=all)
   --dmg                      On macOS, create a DMG (only meaningful for onedir .app)
+  --gen-install              Generate install/run wrapper scripts into repo root (default)
+  --no-gen-install           Do not generate install/run wrapper scripts
+  --venv-dir DIR             Virtualenv directory for wrapper scripts (default: .venv)
+  --requirements PATH        Requirements file used by wrapper scripts if present (default: requirements.txt)
   -h, --help                 Show this help
 
 Examples:
@@ -151,7 +155,7 @@ PKG=""                     # empty = auto, or onefile/onedir
 PYTHON_BIN="$(command -v python3.11 || true)"
 USE_SYSTEM_PYQT=0
 
- # macOS DMG toggle
+# macOS DMG toggle
 MAKE_DMG=0
 
 # PyInstaller debug toggle
@@ -179,6 +183,11 @@ DEFAULT_DATA_CANDIDATES=(
 
 # Optional config file
 CFG_FILE=""
+
+# Wrapper script defaults
+GENERATE_INSTALL=1
+VENV_DIR=".venv"
+REQ_FILE="requirements.txt"
 
 # Load simple KEY=VALUE config (no code execution)
 # Supported keys:
@@ -270,6 +279,19 @@ apply_cfg_kv() {
         item="$(trim_ws "$item")"
         [ -n "$item" ] && HIDDEN_IMPORTS+=("$item")
       done < <(split_list "$val")
+      ;;
+    GEN_INSTALL)
+      if [ "$val" = "1" ] || [ "$val" = "true" ] || [ "$val" = "yes" ]; then
+        GENERATE_INSTALL=1
+      elif [ "$val" = "0" ] || [ "$val" = "false" ] || [ "$val" = "no" ]; then
+        GENERATE_INSTALL=0
+      fi
+      ;;
+    VENV_DIR)
+      VENV_DIR="$val"
+      ;;
+    REQUIREMENTS)
+      REQ_FILE="$val"
       ;;
     *)
       # unknown keys ignored for forward-compat
@@ -370,6 +392,22 @@ while [ $# -gt 0 ]; do
     --dmg)
       MAKE_DMG=1
       ;;
+    --gen-install)
+      GENERATE_INSTALL=1
+      ;;
+    --no-gen-install)
+      GENERATE_INSTALL=0
+      ;;
+    --venv-dir)
+      shift
+      [ $# -gt 0 ] || die "--venv-dir requires a value"
+      VENV_DIR="$1"
+      ;;
+    --requirements)
+      shift
+      [ $# -gt 0 ] || die "--requirements requires a value"
+      REQ_FILE="$1"
+      ;;
     -h|--help)
       show_help
       exit 0
@@ -398,6 +436,9 @@ CLI_MAKE_DMG="$MAKE_DMG"
 CLI_CLEAN="${CLEAN:-0}"
 CLI_ADD_DATA=("${ADD_DATA[@]+${ADD_DATA[@]}}")
 CLI_HIDDEN_IMPORTS=("${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}")
+CLI_GENERATE_INSTALL="$GENERATE_INSTALL"
+CLI_VENV_DIR="$VENV_DIR"
+CLI_REQ_FILE="$REQ_FILE"
 
 # Determine config path
 if [ -z "$CFG_FILE" ] && [ -f "build.cfg" ]; then
@@ -426,6 +467,16 @@ fi
 [ "$CLI_USE_SYSTEM_PYQT" != "0" ] && USE_SYSTEM_PYQT="$CLI_USE_SYSTEM_PYQT" || true
 [ "$CLI_MAKE_DMG" != "0" ] && MAKE_DMG="$CLI_MAKE_DMG" || true
 if [ "$CLI_CLEAN" = "1" ]; then CLEAN=1; fi
+# New CLI re-apply for wrapper script settings
+if [ "$CLI_GENERATE_INSTALL" != "1" ]; then
+  GENERATE_INSTALL="$CLI_GENERATE_INSTALL"
+fi
+if [ "$CLI_VENV_DIR" != ".venv" ]; then
+  VENV_DIR="$CLI_VENV_DIR"
+fi
+if [ "$CLI_REQ_FILE" != "requirements.txt" ]; then
+  REQ_FILE="$CLI_REQ_FILE"
+fi
 
 # Arrays
 if [ "${#CLI_ADD_DATA[@]}" -gt 0 ]; then
@@ -452,6 +503,132 @@ fi
 # macOS: regenerate icon.icns from icon.svg on every build (if present)
 # -----------------------------------------------------------------------------
 generate_icns_from_svg_macos
+
+# -----------------------------------------------------------------------------
+# Generate developer-friendly install/run wrapper scripts (if enabled)
+# -----------------------------------------------------------------------------
+generate_wrapper_scripts() {
+  [ "${GENERATE_INSTALL:-1}" -eq 1 ] || return 0
+
+  local out_dir="$1"  # e.g. . (repo root)
+  mkdir -p "$out_dir"
+
+  # ---------------------------------------------------------------------------
+  # POSIX shell wrapper (macOS/Linux)
+  # ---------------------------------------------------------------------------
+  cat >"$out_dir/run.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Replicator dev/run wrapper
+# - Creates a virtualenv if missing
+# - Installs runtime deps (prefers requirements.txt if present)
+# - Runs src/main.py
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+VENV_DIR="__VENV_DIR__"
+REQ_FILE="__REQ_FILE__"
+PY_BIN="python3.11"
+
+if command -v "$PY_BIN" >/dev/null 2>&1; then
+  :
+elif command -v python3 >/dev/null 2>&1; then
+  PY_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PY_BIN="python"
+else
+  echo "ERROR: Python not found in PATH" >&2
+  exit 1
+fi
+
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+  echo "Creating virtualenv: $VENV_DIR"
+  "$PY_BIN" -m venv "$VENV_DIR"
+fi
+
+# shellcheck disable=SC1090
+source "$VENV_DIR/bin/activate"
+
+python -m pip install --upgrade pip wheel
+
+if [ -f "$REQ_FILE" ]; then
+  echo "Installing requirements from $REQ_FILE"
+  python -m pip install -r "$REQ_FILE"
+else
+  echo "Installing minimal runtime deps (PyQt5)"
+  python -m pip install "PyQt5>=5.15,<6"
+fi
+
+exec python "src/main.py" "$@"
+SH
+
+  # Patch placeholders
+  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/run.sh"
+  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/run.sh"
+  chmod +x "$out_dir/run.sh" || true
+
+  # ---------------------------------------------------------------------------
+  # Windows PowerShell wrapper + .bat convenience launcher
+  # ---------------------------------------------------------------------------
+  cat >"$out_dir/run.ps1" <<'PS1'
+Param(
+  [Parameter(ValueFromRemainingArguments=$true)]
+  [string[]]$Args
+)
+
+# Replicator dev/run wrapper
+# - Creates a virtualenv if missing
+# - Installs runtime deps (prefers requirements.txt if present)
+# - Runs src/main.py
+
+$ErrorActionPreference = "Stop"
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RootDir = Resolve-Path $ScriptDir
+Set-Location $RootDir
+
+$VenvDir = "__VENV_DIR__"
+$ReqFile = "__REQ_FILE__"
+
+$Py = "python"
+if (Get-Command "python3.11" -ErrorAction SilentlyContinue) { $Py = "python3.11" }
+elseif (Get-Command "python" -ErrorAction SilentlyContinue) { $Py = "python" }
+else { throw "Python not found in PATH" }
+
+if (-not (Test-Path (Join-Path $VenvDir "Scripts\python.exe"))) {
+  Write-Host "Creating virtualenv: $VenvDir"
+  & $Py -m venv $VenvDir
+}
+
+& (Join-Path $VenvDir "Scripts\python.exe") -m pip install --upgrade pip wheel
+
+if (Test-Path $ReqFile) {
+  Write-Host "Installing requirements from $ReqFile"
+  & (Join-Path $VenvDir "Scripts\python.exe") -m pip install -r $ReqFile
+} else {
+  Write-Host "Installing minimal runtime deps (PyQt5)"
+  & (Join-Path $VenvDir "Scripts\python.exe") -m pip install "PyQt5>=5.15,<6"
+}
+
+& (Join-Path $VenvDir "Scripts\python.exe") "src\main.py" @Args
+PS1
+
+  # Patch placeholders (use sed for cross-platform simplicity)
+  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/run.ps1"
+  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/run.ps1"
+
+  cat >"$out_dir/run.bat" <<'BAT'
+@echo off
+setlocal
+
+REM Convenience launcher for PowerShell wrapper
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1" %*
+
+endlocal
+BAT
+}
 
 # -----------------------------------------------------------------------------
 # Validate
@@ -508,6 +685,7 @@ if [ "${CLEAN:-0}" -eq 1 ]; then
 fi
 
 mkdir -p "$FINAL_DIR"
+generate_wrapper_scripts "."
 
 # -----------------------------------------------------------------------------
 # Create/verify venv (Python 3.11)
@@ -716,3 +894,6 @@ deactivate
 # CLEAN=1
 # ADD_DATA=src/app:app;src/styles:styles;src/icons:icons
 # HIDDEN_IMPORTS=PyQt5.QtSvg;some_package.some_module
+# GEN_INSTALL=1
+# VENV_DIR=.venv
+# REQUIREMENTS=requirements.txt
