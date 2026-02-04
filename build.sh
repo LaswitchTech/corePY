@@ -950,6 +950,12 @@ python -m pip install --upgrade pip wheel
 log "Installing build dependencies..."
 python -m pip install "pyinstaller>=6.9,<7" "sip>=6.9,<7"
 
+# PyInstaller on Windows requires .ico (or Pillow for automatic conversion from .png).
+# Install Pillow when building on Windows so we can safely use .png icons or generate .ico.
+if [ "$OS" = "windows" ]; then
+  python -m pip install "pillow>=10,<12" || true
+fi
+
 # Optional: system PyQt5 on Linux ARM (APT)
 if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
   if [ "$OS" != "linux" ]; then
@@ -997,7 +1003,45 @@ fi
 
 # Icon
 if [ -n "$ICON_FILE" ] && [ -f "$ICON_FILE" ]; then
-  PYI_ARGS+=(--icon "$ICON_FILE")
+  if [ "$OS" = "windows" ]; then
+    ext="${ICON_FILE##*.}"
+    ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+
+    # On Windows, PyInstaller only accepts .ico/.exe as icon inputs unless Pillow is installed.
+    # If the provided icon is .png, convert it to a temporary .ico using Pillow.
+    if [ "$ext" = "png" ]; then
+      mkdir -p build
+      ICO_FROM_PNG="build/icon_from_png.ico"
+      python - <<'PY' "$ICON_FILE" "$ICO_FROM_PNG" || true
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+
+try:
+    from PIL import Image
+except Exception as e:
+    raise SystemExit(1)
+
+img = Image.open(src).convert("RGBA")
+# Common Windows icon sizes
+sizes = [(16,16), (24,24), (32,32), (48,48), (64,64), (128,128), (256,256)]
+img.save(dst, format="ICO", sizes=sizes)
+print(dst)
+PY
+      if [ -f "$ICO_FROM_PNG" ]; then
+        PYI_ARGS+=(--icon "$ICO_FROM_PNG")
+      else
+        log "WARN: Failed to convert PNG icon to ICO; continuing without --icon"
+      fi
+    else
+      # .ico/.exe already
+      PYI_ARGS+=(--icon "$ICON_FILE")
+    fi
+  else
+    PYI_ARGS+=(--icon "$ICON_FILE")
+  fi
 fi
 
 # Hidden imports
@@ -1017,13 +1061,15 @@ PY
 for hi in "${HIDDEN_IMPORTS[@]+${HIDDEN_IMPORTS[@]}}"; do
   [ -n "$hi" ] || continue
 
-  # Normalize common SIP hidden import for PyQt5
+  # Normalize common SIP hidden import for PyQt5.
+  # The standalone `sip` module is often NOT importable even if the sip build tooling is installed.
   if [ "$hi" = "sip" ]; then
-    if can_import "sip"; then
-      :
-    elif can_import "PyQt5.sip"; then
+    if can_import "PyQt5.sip"; then
       log "Normalizing hidden import: sip -> PyQt5.sip"
       hi="PyQt5.sip"
+    else
+      log "WARN: Skipping hidden import not found: sip (and PyQt5.sip not available)"
+      continue
     fi
   fi
 
