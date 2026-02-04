@@ -623,18 +623,39 @@ PS1
 @echo off
 setlocal
 
-REM Replicator double-click launcher (Windows)
-REM - Runs PowerShell wrapper with a hidden window
-REM - Exits immediately so no console stays open
+REM Replicator launcher (Windows)
+REM - Double-click (no args): starts hidden and exits immediately
+REM - CLI usage (with args like --help): runs in the current console so you can see output
 
 set "SCRIPT_DIR=%~dp0"
 
-REM Use Start-Process so this batch exits right away.
-REM WindowStyle Hidden avoids showing a console window.
+REM If the user provided args, run in the current console (do not hide), so output is visible.
+if not "%~1"=="" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run.ps1" %*
+  endlocal
+  exit /b %ERRORLEVEL%
+)
+
+REM No args: start hidden and exit right away.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path '%SCRIPT_DIR%' 'run.ps1'))"
 
 endlocal
 exit /b 0
+BAT
+
+  cat >"$out_dir/run-cli.bat" <<'BAT'
+@echo off
+setlocal
+
+REM Replicator CLI wrapper (Windows)
+REM Always runs in the current console and forwards all arguments.
+
+set "SCRIPT_DIR=%~dp0"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run.ps1" %*
+
+endlocal
+exit /b %ERRORLEVEL%
 BAT
 
   cat >"$out_dir/run.vbs" <<'VBS'
