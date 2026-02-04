@@ -244,8 +244,50 @@ MODE="console"             # console|windowed
 # Packaging defaults: macOS prefers onedir (for .app), Linux prefers onefile
 PKG=""                     # empty = auto, or onefile/onedir
 
+#
 # Python / venv defaults
-PYTHON_BIN="$(command -v python3.11 || true)"
+# Python discovery
+# - macOS/Linux: prefer python3.11
+# - Windows (Git Bash): prefer Python Launcher `py -3.11`, otherwise `python`
+PYTHON_BIN=""
+PYTHON_LAUNCH_ARGS=""
+
+if command -v python3.11 >/dev/null 2>&1; then
+  PYTHON_BIN="python3.11"
+elif [ "$OS" = "windows" ] && command -v py >/dev/null 2>&1; then
+  PYTHON_BIN="py"
+  PYTHON_LAUNCH_ARGS="-3.11"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+fi
+
+python_exec() {
+  # Wrapper so we can call: python_exec -m venv ...
+  if [ -n "${PYTHON_LAUNCH_ARGS:-}" ]; then
+    "$PYTHON_BIN" "$PYTHON_LAUNCH_ARGS" "$@"
+  else
+    "$PYTHON_BIN" "$@"
+  fi
+}
+
+venv_python_path() {
+  if [ "$OS" = "windows" ]; then
+    echo "$VENV_DIR/Scripts/python.exe"
+  else
+    echo "$VENV_DIR/bin/python"
+  fi
+}
+
+venv_activate_path() {
+  if [ "$OS" = "windows" ]; then
+    echo "$VENV_DIR/Scripts/activate"
+  else
+    echo "$VENV_DIR/bin/activate"
+  fi
+}
+
 USE_SYSTEM_PYQT=0
 
 # macOS DMG toggle
@@ -769,7 +811,7 @@ VBS
 # -----------------------------------------------------------------------------
 # Validate
 # -----------------------------------------------------------------------------
-[ -n "$PYTHON_BIN" ] || die "python3.11 not found. On macOS: brew install python@3.11"
+[ -n "$PYTHON_BIN" ] || die "Python not found. Install Python 3.11+ and ensure it is available as python3.11 (macOS/Linux) or via the Windows Python Launcher: py -3.11"
 [ -f "$ENTRY" ] || die "Entry not found: $ENTRY"
 
 ARCH="$(uname -m)"
@@ -830,10 +872,10 @@ generate_wrapper_scripts "."
 # Create/verify venv (Python 3.11)
 # -----------------------------------------------------------------------------
 NEED_RECREATE=0
-if [ ! -x "$VENV_DIR/bin/python" ]; then
+if [ ! -x "$(venv_python_path)" ]; then
   NEED_RECREATE=1
 else
-  VENV_VER="$("$VENV_DIR/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || echo unknown)"
+  VENV_VER="$("$(venv_python_path)" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || echo unknown)"
   if [ "$VENV_VER" != "3.11" ]; then
     NEED_RECREATE=1
   fi
@@ -843,17 +885,17 @@ if [ "$NEED_RECREATE" -eq 1 ]; then
   log "Creating fresh Python 3.11 virtual environment in $VENV_DIR..."
   rm -rf "$VENV_DIR"
   if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
-    "$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
+    python_exec -m venv --system-site-packages "$VENV_DIR"
   else
-    "$PYTHON_BIN" -m venv "$VENV_DIR"
+    python_exec -m venv "$VENV_DIR"
   fi
 fi
 
 # shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+source "$(venv_activate_path)"
 
 ACTIVE_VER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-[ "$ACTIVE_VER" = "3.11" ] || die "Active Python is $ACTIVE_VER, expected 3.11"
+[ "$ACTIVE_VER" = "3.11" ] || die "Active Python is $ACTIVE_VER, expected 3.11. On Windows, install Python 3.11 and/or use: py -3.11"
 log "Using Python $(python -V)"
 
 log "Updating pip..."
