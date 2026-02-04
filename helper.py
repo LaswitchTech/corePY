@@ -123,7 +123,7 @@ class Helper:
     ) -> str:
         """Return the OS-appropriate directory for user *data*.
 
-        - Windows: %LOCALAPPDATA%\<AppName>
+        - Windows: %LOCALAPPDATA%\\<AppName>
         - macOS: ~/Library/Application Support/<AppName>
         - Linux: $XDG_DATA_HOME/<AppName> (fallback ~/.local/share/<AppName>)
 
@@ -164,7 +164,7 @@ class Helper:
     ) -> str:
         """Return the OS-appropriate directory for user *configuration*.
 
-        - Windows: %APPDATA%\<AppName>
+        - Windows: %APPDATA%\\<AppName>
         - macOS: ~/Library/Preferences/<AppName>
         - Linux: $XDG_CONFIG_HOME/<AppName> (fallback ~/.config/<AppName>)
 
