@@ -870,9 +870,17 @@ REM Install minimal deps (idempotent)
 echo Installing minimal runtime deps (PyQt5)...
 "%VENV_PY%" -m pip install "PyQt5>=5.15,<6" >nul
 
-REM Run the app entry in console mode
+REM Prefer the built console companion if available
+if exist "%SCRIPT_DIR%dist\windows\Replicator-cli.exe" (
+  "%SCRIPT_DIR%dist\windows\Replicator-cli.exe" %*
+  endlocal
+  exit /b %ERRORLEVEL%
+)
+
+REM Fallback: Run the source entry in console mode (dev checkout)
 if not exist "%SCRIPT_DIR%src\main.py" (
   echo ERROR: Entry not found: %SCRIPT_DIR%src\main.py
+  echo NOTE: Replicator-cli.exe not found at %SCRIPT_DIR%dist\windows\Replicator-cli.exe
   exit /b 1
 )
 
@@ -1181,8 +1189,45 @@ log "PyInstaller command:"
 printf '  %q ' pyinstaller "${PYI_ARGS[@]}" "$ENTRY"
 printf '\n'
 
+
 # Execute PyInstaller
 pyinstaller "${PYI_ARGS[@]}" "$ENTRY"
+
+# ---------------------------------------------------------------------------
+# Windows: also build a console-subsystem companion EXE for CLI usage.
+# - Keeps the main EXE as --windowed (nice for double-click)
+# - Produces <APP_NAME>-cli.exe without --windowed so stdout/stderr work in terminals
+# ---------------------------------------------------------------------------
+if [ "$OS" = "windows" ] && [ "$MODE" = "windowed" ]; then
+  CLI_APP_NAME="${APP_NAME}-cli"
+
+  log "Building $CLI_APP_NAME for $OS ($PKG, console) from entry: $ENTRY"
+
+  # Copy args and adjust for console build
+  PYI_CLI_ARGS=("${PYI_ARGS[@]}")
+
+  # Replace --name value
+  for i in "${!PYI_CLI_ARGS[@]}"; do
+    if [ "${PYI_CLI_ARGS[$i]}" = "--name" ]; then
+      PYI_CLI_ARGS[$((i+1))]="$CLI_APP_NAME"
+    fi
+  done
+
+  # Remove --windowed if present
+  PYI_CLI_ARGS_STRIPPED=()
+  for a in "${PYI_CLI_ARGS[@]}"; do
+    if [ "$a" = "--windowed" ]; then
+      continue
+    fi
+    PYI_CLI_ARGS_STRIPPED+=("$a")
+  done
+
+  log "PyInstaller command (CLI companion):"
+  printf '  %q ' pyinstaller "${PYI_CLI_ARGS_STRIPPED[@]}" "$ENTRY"
+  printf '\n'
+
+  pyinstaller "${PYI_CLI_ARGS_STRIPPED[@]}" "$ENTRY"
+fi
 
 # -----------------------------------------------------------------------------
 # Collect output
@@ -1208,8 +1253,41 @@ if [ "$OS" = "macos" ]; then
   fi
 else
   log "Moving build output to $FINAL_DIR/"
-  rm -rf "$FINAL_DIR/$APP_NAME" || true
-  mv "dist/$APP_NAME" "$FINAL_DIR/"
+
+  # Windows onefile creates dist/<name>.exe; onedir creates dist/<name>/
+  # Move all matching outputs for this app (and its -cli companion).
+  if [ "$OS" = "windows" ]; then
+    # Clean old outputs
+    rm -f "$FINAL_DIR/${APP_NAME}.exe" "$FINAL_DIR/${APP_NAME}-cli.exe" || true
+    rm -rf "$FINAL_DIR/$APP_NAME" "$FINAL_DIR/${APP_NAME}-cli" || true
+
+    # Prefer moving EXEs if they exist
+    if [ -f "dist/${APP_NAME}.exe" ]; then
+      mv "dist/${APP_NAME}.exe" "$FINAL_DIR/"
+    elif [ -f "dist/$APP_NAME" ]; then
+      mv "dist/$APP_NAME" "$FINAL_DIR/" || true
+    fi
+
+    if [ -f "dist/${APP_NAME}-cli.exe" ]; then
+      mv "dist/${APP_NAME}-cli.exe" "$FINAL_DIR/"
+    elif [ -f "dist/${APP_NAME}-cli" ]; then
+      mv "dist/${APP_NAME}-cli" "$FINAL_DIR/" || true
+    fi
+
+    # If onedir outputs were produced, move them too
+    if [ -d "dist/$APP_NAME" ]; then
+      rm -rf "$FINAL_DIR/$APP_NAME" || true
+      mv "dist/$APP_NAME" "$FINAL_DIR/"
+    fi
+    if [ -d "dist/${APP_NAME}-cli" ]; then
+      rm -rf "$FINAL_DIR/${APP_NAME}-cli" || true
+      mv "dist/${APP_NAME}-cli" "$FINAL_DIR/"
+    fi
+
+  else
+    rm -rf "$FINAL_DIR/$APP_NAME" || true
+    mv "dist/$APP_NAME" "$FINAL_DIR/"
+  fi
 fi
 
 log "Build completed successfully. Output: $FINAL_DIR"
@@ -1260,6 +1338,23 @@ URL
       log "Windows shortcut created: $FINAL_DIR/$APP_NAME.url"
     else
       log "WARN: Could not create Windows shortcut (cscript not available)"
+    fi
+  fi
+
+  # Optional: create a shortcut for the CLI companion
+  CLI_EXE_PATH="$(pwd)/$FINAL_DIR/${APP_NAME}-cli.exe"
+  CLI_LNK_PATH="$(pwd)/$FINAL_DIR/${APP_NAME}-cli.lnk"
+  if [ -f "$CLI_EXE_PATH" ]; then
+    if command -v cscript >/dev/null 2>&1; then
+      cscript //nologo "build/make_shortcut.vbs" "$(cygpath -w "$CLI_EXE_PATH" 2>/dev/null || echo "$CLI_EXE_PATH")" "$(cygpath -w "$CLI_LNK_PATH" 2>/dev/null || echo "$CLI_LNK_PATH")" >/dev/null 2>&1 || true
+    fi
+    if [ ! -f "$CLI_LNK_PATH" ]; then
+      cat >"$FINAL_DIR/${APP_NAME}-cli.url" <<URL
+[InternetShortcut]
+URL=file:///${CLI_EXE_PATH}
+IconFile=${CLI_EXE_PATH}
+IconIndex=0
+URL
     fi
   fi
 fi
