@@ -690,11 +690,11 @@ generate_wrapper_scripts() {
   # ---------------------------------------------------------------------------
   # POSIX shell wrapper (macOS/Linux)
   # ---------------------------------------------------------------------------
-  cat >"$out_dir/run.sh" <<'SH'
+  cat >"$out_dir/launch.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Replicator dev/run wrapper
+# Replicator dev launcher (Git Bash compatible)
 # - Creates a virtualenv if missing
 # - Installs runtime deps (prefers requirements.txt if present)
 # - Runs src/main.py
@@ -739,111 +739,74 @@ exec python "src/main.py" "$@"
 SH
 
   # Patch placeholders
-  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/run.sh"
-  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/run.sh"
-  chmod +x "$out_dir/run.sh" || true
+  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/launch.sh"
+  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/launch.sh"
+  chmod +x "$out_dir/launch.sh" || true
+
+  # CLI convenience (same as launch.sh but kept as a stable name for docs/scripts)
+  cat >"$out_dir/cli.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+exec "./launch.sh" "$@"
+SH
+  chmod +x "$out_dir/cli.sh" || true
 
   # ---------------------------------------------------------------------------
-  # Windows PowerShell wrapper + .bat convenience launcher
+  # Windows: VBS launcher (launch.vbs) and CLI .bat launcher (cli.bat)
   # ---------------------------------------------------------------------------
-  cat >"$out_dir/run.ps1" <<'PS1'
-Param(
-  [Parameter(ValueFromRemainingArguments=$true)]
-  [string[]]$Args
-)
+  cat >"$out_dir/launch.vbs" <<'VBS'
+' Replicator Windows launcher (no console)
+' - Prefers launching the built binary if present
+' - Falls back to launching Git Bash + launch.sh if available
 
-# Replicator dev/run wrapper
-# - Creates a virtualenv if missing
-# - Installs runtime deps (prefers requirements.txt if present)
-# - Runs src/main.py
+Option Explicit
 
-$ErrorActionPreference = "Stop"
+Dim shell, fso, scriptDir, exePath, bashPath, cmd
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RootDir = Resolve-Path $ScriptDir
-Set-Location $RootDir
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 
-$VenvDir = "__VENV_DIR__"
-$ReqFile = "__REQ_FILE__"
+' Try built EXE first
+exePath = scriptDir & "\\dist\\windows\\Replicator.exe"
+If fso.FileExists(exePath) Then
+  shell.Run Chr(34) & exePath & Chr(34), 0, False
+  WScript.Quit 0
+End If
 
-$Py = "python"
-if (Get-Command "python3.11" -ErrorAction SilentlyContinue) { $Py = "python3.11" }
-elseif (Get-Command "python" -ErrorAction SilentlyContinue) { $Py = "python" }
-else { throw "Python not found in PATH" }
+' Fallback: Git Bash launch.sh (if user is in a dev checkout)
+bashPath = shell.ExpandEnvironmentStrings("%ProgramFiles%") & "\\Git\\bin\\bash.exe"
+If fso.FileExists(bashPath) Then
+  cmd = Chr(34) & bashPath & Chr(34) & " -lc " & Chr(34) & "cd '" & scriptDir & "' && ./launch.sh" & Chr(34)
+  shell.Run cmd, 0, False
+End If
+VBS
 
-if (-not (Test-Path (Join-Path $VenvDir "Scripts\python.exe"))) {
-  Write-Host "Creating virtualenv: $VenvDir"
-  & $Py -m venv $VenvDir
-}
-
-& (Join-Path $VenvDir "Scripts\python.exe") -m pip install --upgrade pip wheel
-
-if (Test-Path $ReqFile) {
-  Write-Host "Installing requirements from $ReqFile"
-  & (Join-Path $VenvDir "Scripts\python.exe") -m pip install -r $ReqFile
-} else {
-  Write-Host "Installing minimal runtime deps (PyQt5)"
-  & (Join-Path $VenvDir "Scripts\python.exe") -m pip install "PyQt5>=5.15,<6"
-}
-
-& (Join-Path $VenvDir "Scripts\python.exe") "src\main.py" @Args
-PS1
-
-  # Patch placeholders (use sed for cross-platform simplicity)
-  sed_inplace "s|__VENV_DIR__|$VENV_DIR|g" "$out_dir/run.ps1"
-  sed_inplace "s|__REQ_FILE__|$REQ_FILE|g" "$out_dir/run.ps1"
-
-  cat >"$out_dir/run.bat" <<'BAT'
+  cat >"$out_dir/cli.bat" <<'BAT'
 @echo off
 setlocal
 
-REM Replicator launcher (Windows)
-REM - Double-click (no args): starts hidden and exits immediately
-REM - CLI usage (with args like --help): runs in the current console so you can see output
+REM Replicator CLI launcher (Windows)
+REM - Runs the built EXE if present
+REM - If not present, asks the user to run ./cli.sh from Git Bash
 
 set "SCRIPT_DIR=%~dp0"
 
-REM If the user provided args, run in the current console (do not hide), so output is visible.
-if not "%~1"=="" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run.ps1" %*
+if exist "%SCRIPT_DIR%dist\\windows\\Replicator.exe" (
+  "%SCRIPT_DIR%dist\\windows\\Replicator.exe" %*
   endlocal
   exit /b %ERRORLEVEL%
 )
 
-REM No args: start hidden and exit right away.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path '%SCRIPT_DIR%' 'run.ps1'))"
-
+echo Replicator.exe not found at "%SCRIPT_DIR%dist\\windows\\Replicator.exe".
+echo If you are in a dev checkout, use Git Bash and run: ./cli.sh --help
 endlocal
-exit /b 0
+exit /b 1
 BAT
-
-  cat >"$out_dir/run-cli.bat" <<'BAT'
-@echo off
-setlocal
-
-REM Replicator CLI wrapper (Windows)
-REM Always runs in the current console and forwards all arguments.
-
-set "SCRIPT_DIR=%~dp0"
-
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%run.ps1" %*
-
-endlocal
-exit /b %ERRORLEVEL%
-BAT
-
-  cat >"$out_dir/run.vbs" <<'VBS'
-' Replicator Windows launcher (no console)
-' Double-click this file to start the app without a prompt window.
-
-Dim shell, scriptDir, ps1
-Set shell = CreateObject("WScript.Shell")
-scriptDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-ps1 = Chr(34) & scriptDir & "\\run.ps1" & Chr(34)
-
-' 0 = hidden window
-shell.Run "powershell -NoProfile -ExecutionPolicy Bypass -File " & ps1, 0, False
-VBS
 }
 
 # -----------------------------------------------------------------------------
@@ -1150,6 +1113,56 @@ else
 fi
 
 log "Build completed successfully. Output: $FINAL_DIR"
+
+# ---------------------------------------------------------------------------
+# Windows: create a .lnk shortcut (best-effort)
+# ---------------------------------------------------------------------------
+if [ "$OS" = "windows" ]; then
+  EXE_PATH="$(pwd)/$FINAL_DIR/$APP_NAME.exe"
+  LNK_PATH="$(pwd)/$FINAL_DIR/$APP_NAME.lnk"
+
+  # Create a shortcut inside dist/windows (so we can ship it alongside the exe)
+  if [ -f "$EXE_PATH" ]; then
+    mkdir -p "$FINAL_DIR" || true
+    cat >"build/make_shortcut.vbs" <<'VBS'
+Option Explicit
+Dim shell, args, exePath, lnkPath
+Set shell = CreateObject("WScript.Shell")
+Set args = WScript.Arguments
+exePath = args.Item(0)
+lnkPath = args.Item(1)
+Dim sc
+Set sc = shell.CreateShortcut(lnkPath)
+sc.TargetPath = exePath
+sc.WorkingDirectory = CreateObject("Scripting.FileSystemObject").GetParentFolderName(exePath)
+sc.WindowStyle = 1
+sc.Description = "Replicator"
+sc.Save
+VBS
+
+    if command -v cscript >/dev/null 2>&1; then
+      cscript //nologo "build/make_shortcut.vbs" "$(cygpath -w "$EXE_PATH" 2>/dev/null || echo "$EXE_PATH")" "$(cygpath -w "$LNK_PATH" 2>/dev/null || echo "$LNK_PATH")" >/dev/null 2>&1 || true
+    fi
+
+    # Fallback: create a .url shortcut (always works)
+    if [ ! -f "$LNK_PATH" ]; then
+      cat >"$FINAL_DIR/$APP_NAME.url" <<URL
+[InternetShortcut]
+URL=file:///${EXE_PATH}
+IconFile=${EXE_PATH}
+IconIndex=0
+URL
+    fi
+
+    if [ -f "$LNK_PATH" ]; then
+      log "Windows shortcut created: $LNK_PATH"
+    elif [ -f "$FINAL_DIR/$APP_NAME.url" ]; then
+      log "Windows shortcut created: $FINAL_DIR/$APP_NAME.url"
+    else
+      log "WARN: Could not create Windows shortcut (cscript not available)"
+    fi
+  fi
+fi
 
 deactivate
 
