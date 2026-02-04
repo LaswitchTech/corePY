@@ -245,28 +245,66 @@ MODE="console"             # console|windowed
 PKG=""                     # empty = auto, or onefile/onedir
 
 #
-# Python / venv defaults
 # Python discovery
 # - macOS/Linux: prefer python3.11
-# - Windows (Git Bash): prefer Python Launcher `py -3.11`, otherwise `python`
+# - Windows (Git Bash): prefer the Python Launcher when available, but only if the requested runtime exists.
 PYTHON_BIN=""
 PYTHON_LAUNCH_ARGS=""
 
-if command -v python3.11 >/dev/null 2>&1; then
+python_cmd_ok() {
+  # usage: python_cmd_ok <bin> [args...]
+  # returns 0 if command runs and Python version is >= 3.11
+  "$@" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' >/tmp/.replicator_pyver 2>/dev/null || return 1
+  local ver
+  ver="$(cat /tmp/.replicator_pyver 2>/dev/null || true)"
+  rm -f /tmp/.replicator_pyver 2>/dev/null || true
+  case "$ver" in
+    3.11|3.12|3.13|3.14|3.15|3.16|3.17|3.18|3.19|4.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Candidate selection (ordered)
+if command -v python3.11 >/dev/null 2>&1 && python_cmd_ok python3.11; then
   PYTHON_BIN="python3.11"
+  PYTHON_LAUNCH_ARGS=""
 elif [ "$OS" = "windows" ] && command -v py >/dev/null 2>&1; then
-  PYTHON_BIN="py"
-  PYTHON_LAUNCH_ARGS="-3.11"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
+  # Try explicit 3.11 first, then any 3.x that satisfies >=3.11
+  if python_cmd_ok py -3.11; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3.11"
+  elif python_cmd_ok py -3.12; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3.12"
+  elif python_cmd_ok py -3.13; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3.13"
+  elif python_cmd_ok py -3; then
+    PYTHON_BIN="py"
+    PYTHON_LAUNCH_ARGS="-3"
+  fi
 fi
+
+# Fallbacks (Git Bash often exposes only `python`)
+if [ -z "$PYTHON_BIN" ]; then
+  if command -v python3 >/dev/null 2>&1 && python_cmd_ok python3; then
+    PYTHON_BIN="python3"
+    PYTHON_LAUNCH_ARGS=""
+  elif command -v python >/dev/null 2>&1 && python_cmd_ok python; then
+    PYTHON_BIN="python"
+    PYTHON_LAUNCH_ARGS=""
+  fi
+fi
+
+# If user supplied --python, we still validate it later in the script.
 
 python_exec() {
   # Wrapper so we can call: python_exec -m venv ...
+  [ -n "${PYTHON_BIN:-}" ] || die "Python not found. Install Python 3.11+ and ensure it is in PATH (python) or via the Windows Python Launcher (py)."
+
   if [ -n "${PYTHON_LAUNCH_ARGS:-}" ]; then
-    "$PYTHON_BIN" "$PYTHON_LAUNCH_ARGS" "$@"
+    # shellcheck disable=SC2086
+    "$PYTHON_BIN" ${PYTHON_LAUNCH_ARGS} "$@"
   else
     "$PYTHON_BIN" "$@"
   fi
@@ -811,8 +849,16 @@ VBS
 # -----------------------------------------------------------------------------
 # Validate
 # -----------------------------------------------------------------------------
-[ -n "$PYTHON_BIN" ] || die "Python not found. Install Python 3.11+ and ensure it is available as python3.11 (macOS/Linux) or via the Windows Python Launcher: py -3.11"
+[ -n "$PYTHON_BIN" ] || die "Python not found. Install Python 3.11+ and ensure it is available as python (Windows/Git Bash) or via the Windows Python Launcher (py), or as python3.11 (macOS/Linux)."
 [ -f "$ENTRY" ] || die "Entry not found: $ENTRY"
+
+# Validate python runtime is actually runnable and >= 3.11
+if ! python_exec -c "import sys; assert (sys.version_info.major, sys.version_info.minor) >= (3, 11), sys.version" >/dev/null 2>&1; then
+  if [ "$OS" = "windows" ] && [ "$PYTHON_BIN" = "py" ]; then
+    die "Python launcher found, but no suitable Python 3.11+ runtime is installed. Install Python 3.11+ (check 'Add python.exe to PATH') or run: py --list to verify installed versions."
+  fi
+  die "Python is not runnable or is < 3.11. Install Python 3.11+ and try again."
+fi
 
 ARCH="$(uname -m)"
 if [ "$OS" = "linux" ] && { [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "armv7l" ] || [ "$ARCH" = "armhf" ]; }; then
