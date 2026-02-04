@@ -687,31 +687,32 @@ fi
 mkdir -p "$FINAL_DIR"
 generate_wrapper_scripts "."
 
+#
 # -----------------------------------------------------------------------------
 # Create/verify venv (Python 3.11)
 # -----------------------------------------------------------------------------
 NEED_RECREATE=0
-if [ ! -x "env/bin/python" ]; then
+if [ ! -x "$VENV_DIR/bin/python" ]; then
   NEED_RECREATE=1
 else
-  VENV_VER="$(env/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || echo unknown)"
+  VENV_VER="$("$VENV_DIR/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || echo unknown)"
   if [ "$VENV_VER" != "3.11" ]; then
     NEED_RECREATE=1
   fi
 fi
 
 if [ "$NEED_RECREATE" -eq 1 ]; then
-  log "Creating fresh Python 3.11 virtual environment..."
-  rm -rf env
+  log "Creating fresh Python 3.11 virtual environment in $VENV_DIR..."
+  rm -rf "$VENV_DIR"
   if [ "$USE_SYSTEM_PYQT" -eq 1 ]; then
-    "$PYTHON_BIN" -m venv --system-site-packages env
+    "$PYTHON_BIN" -m venv --system-site-packages "$VENV_DIR"
   else
-    "$PYTHON_BIN" -m venv env
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
   fi
 fi
 
 # shellcheck disable=SC1091
-source env/bin/activate
+source "$VENV_DIR/bin/activate"
 
 ACTIVE_VER="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 [ "$ACTIVE_VER" = "3.11" ] || die "Active Python is $ACTIVE_VER, expected 3.11"
