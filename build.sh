@@ -623,11 +623,32 @@ PS1
 @echo off
 setlocal
 
-REM Convenience launcher for PowerShell wrapper
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1" %*
+REM Replicator double-click launcher (Windows)
+REM - Runs PowerShell wrapper with a hidden window
+REM - Exits immediately so no console stays open
+
+set "SCRIPT_DIR=%~dp0"
+
+REM Use Start-Process so this batch exits right away.
+REM WindowStyle Hidden avoids showing a console window.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', (Join-Path '%SCRIPT_DIR%' 'run.ps1'))"
 
 endlocal
+exit /b 0
 BAT
+
+  cat >"$out_dir/run.vbs" <<'VBS'
+' Replicator Windows launcher (no console)
+' Double-click this file to start the app without a prompt window.
+
+Dim shell, scriptDir, ps1
+Set shell = CreateObject("WScript.Shell")
+scriptDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
+ps1 = Chr(34) & scriptDir & "\\run.ps1" & Chr(34)
+
+' 0 = hidden window
+shell.Run "powershell -NoProfile -ExecutionPolicy Bypass -File " & ps1, 0, False
+VBS
 }
 
 # -----------------------------------------------------------------------------
