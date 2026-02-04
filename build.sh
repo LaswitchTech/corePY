@@ -36,10 +36,12 @@ sed_inplace() {
   fi
 }
 
-# -----------------------------------------------------------------------------
-# macOS icon generation: icon.svg -> icon.icns
-# Regenerates on every build (macOS only) when src/icons/icon.svg exists.
-# Requires: iconutil (built-in) + either rsvg-convert (librsvg) OR inkscape.
+#
+# Icon generation
+# - macOS: icon.svg -> icon.icns (every build)
+# - Windows: icon.svg -> icon.ico (best-effort, every build)
+# Requires: iconutil (macOS) + either rsvg-convert (librsvg) OR inkscape.
+# Windows ICO generation prefers: ImageMagick (magick/convert) OR Python + Pillow.
 # -----------------------------------------------------------------------------
 
 generate_icns_from_svg_macos() {
@@ -95,6 +97,97 @@ generate_icns_from_svg_macos() {
 
   # Cleanup iconset directory (keep build folder)
   rm -rf "$iconset"
+}
+
+# -----------------------------------------------------------------------------
+# Windows icon generation: icon.svg -> icon.ico
+# Best-effort: uses inkscape/rsvg-convert to render PNGs then combines to ICO.
+# Prefers ImageMagick; falls back to Python+Pillow if available.
+# -----------------------------------------------------------------------------
+
+generate_ico_from_svg_windows() {
+  [ "$OS" = "windows" ] || return 0
+
+  local svg="src/icons/icon.svg"
+  local out="src/icons/icon.ico"
+
+  [ -f "$svg" ] || return 0
+
+  local renderer=""
+  if command -v rsvg-convert >/dev/null 2>&1; then
+    renderer="rsvg"
+  elif command -v inkscape >/dev/null 2>&1; then
+    renderer="inkscape"
+  else
+    log "WARN: Neither rsvg-convert nor inkscape found; cannot generate .ico from $svg"
+    log "      Install one of them (recommended: Inkscape)"
+    return 0
+  fi
+
+  mkdir -p "build"
+
+  local tmpdir="build/icon.ico.tmp"
+  rm -rf "$tmpdir"
+  mkdir -p "$tmpdir"
+
+  # Common ICO sizes
+  local sizes=(16 24 32 48 64 128 256)
+
+  log "Regenerating Windows icon: $out (from $svg using $renderer)"
+
+  for s in "${sizes[@]}"; do
+    if [ "$renderer" = "rsvg" ]; then
+      rsvg-convert -w "$s" -h "$s" "$svg" -o "$tmpdir/${s}.png"
+    else
+      # inkscape CLI (v1+)
+      inkscape "$svg" --export-type=png --export-width="$s" --export-height="$s" --export-filename="$tmpdir/${s}.png" >/dev/null 2>&1
+    fi
+  done
+
+  # Combine PNGs into ICO
+  if command -v magick >/dev/null 2>&1; then
+    # ImageMagick 7+
+    magick "$tmpdir/16.png" "$tmpdir/24.png" "$tmpdir/32.png" "$tmpdir/48.png" "$tmpdir/64.png" "$tmpdir/128.png" "$tmpdir/256.png" "$out" 2>/dev/null || true
+  elif command -v convert >/dev/null 2>&1; then
+    # ImageMagick 6 (convert)
+    convert "$tmpdir/16.png" "$tmpdir/24.png" "$tmpdir/32.png" "$tmpdir/48.png" "$tmpdir/64.png" "$tmpdir/128.png" "$tmpdir/256.png" "$out" 2>/dev/null || true
+  else
+    # Fallback: Python + Pillow (if available)
+    python - <<'PY' "$tmpdir" "$out" 2>/dev/null || true
+import sys
+from pathlib import Path
+
+tmpdir = Path(sys.argv[1])
+out = Path(sys.argv[2])
+
+try:
+    from PIL import Image
+except Exception:
+    raise SystemExit(1)
+
+sizes = [16, 24, 32, 48, 64, 128, 256]
+imgs = []
+for s in sizes:
+    p = tmpdir / f"{s}.png"
+    if p.exists():
+        imgs.append(Image.open(p))
+
+if not imgs:
+    raise SystemExit(1)
+
+# Pillow writes multi-size ICO when you pass sizes
+base = imgs[-1]
+base.save(out, format="ICO", sizes=[(s, s) for s in sizes])
+PY
+  fi
+
+  if [ -f "$out" ]; then
+    log "Windows icon generated: $out"
+  else
+    log "WARN: Failed to generate $out (install ImageMagick or Python Pillow for best results)"
+  fi
+
+  rm -rf "$tmpdir"
 }
 
 # Guess app name from current folder if not provided
@@ -500,9 +593,10 @@ if [ "${#CLI_HIDDEN_IMPORTS[@]}" -gt 0 ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# macOS: regenerate icon.icns from icon.svg on every build (if present)
+# Regenerate platform icons from icon.svg on every build (if present)
 # -----------------------------------------------------------------------------
 generate_icns_from_svg_macos
+generate_ico_from_svg_windows
 
 # -----------------------------------------------------------------------------
 # Generate developer-friendly install/run wrapper scripts (if enabled)
@@ -698,6 +792,8 @@ fi
 if [ -z "$ICON_FILE" ]; then
   if [ "$OS" = "macos" ] && [ -f "src/icons/icon.icns" ]; then
     ICON_FILE="src/icons/icon.icns"
+  elif [ "$OS" = "windows" ] && [ -f "src/icons/icon.ico" ]; then
+    ICON_FILE="src/icons/icon.ico"
   elif [ -f "src/icons/icon.png" ]; then
     ICON_FILE="src/icons/icon.png"
   fi
