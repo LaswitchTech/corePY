@@ -374,9 +374,6 @@ class Service:
     # ------------------------------------------------------------------
 
     def install(self) -> None:
-        # If running frozen (PyInstaller), service install is not supported by this helper.
-        if getattr(sys, "frozen", False):
-            raise NotImplementedError("Service install from a frozen .app/.exe is not supported")
 
         if sys.platform.startswith("win"):
             self._install_windows_service()
@@ -388,8 +385,6 @@ class Service:
         self._refresh_action_visibility()
 
     def uninstall(self) -> None:
-        if getattr(sys, "frozen", False):
-            raise NotImplementedError("Service uninstall from a frozen .app/.exe is not supported")
 
         if sys.platform.startswith("win"):
             self._uninstall_windows_service()
@@ -408,16 +403,17 @@ class Service:
         service_name = f"{self._app_name()}.service"
         unit_path = os.path.join("/etc/systemd/system", service_name)
 
-        python_exe = sys.executable
-        entry = os.path.abspath(sys.argv[0])
-        workdir = os.path.dirname(entry)
+        program_start, argv_start, workdir = self._service_command("start")
+        program_stop, argv_stop, _ = self._service_command("stop")
 
         unit = self._systemd_unit(
             service_name=service_name,
-            python_exe=python_exe,
-            entrypoint=entry,
+            python_exe=program_start,
+            entrypoint=" ".join(argv_start),
             working_dir=workdir,
             pidfile=self._pidfile(),
+            execstop_program=program_stop,
+            execstop_args=" ".join(argv_stop),
         )
 
         with open(unit_path, "w", encoding="utf-8") as f:
@@ -450,6 +446,8 @@ class Service:
         entrypoint: str,
         working_dir: str,
         pidfile: str,
+        execstop_program: str,
+        execstop_args: str,
     ) -> str:
         app_name = self._app_name()
         return (
@@ -461,8 +459,8 @@ class Service:
             "Environment=COREPY_RUN_AS_SERVICE=1\n"
             f"Environment=COREPY_SERVICE_LABEL={self._service_label()}\n"
             f"WorkingDirectory={working_dir}\n"
-            f"ExecStart={python_exe} {entrypoint} --start\n"
-            f"ExecStop={python_exe} {entrypoint} --stop\n"
+            f"ExecStart={python_exe} {entrypoint}\n"
+            f"ExecStop={execstop_program} {execstop_args}\n"
             "Restart=on-failure\n"
             "RestartSec=2\n"
             f"PIDFile={pidfile}\n"
@@ -785,17 +783,29 @@ class Service:
 
     def _install_windows_service(self) -> None:
         name = self._service_label()
-        python_exe, entry, workdir = self._entry_command()
+
+        program, argv, workdir = self._service_command("start")
 
         # binPath must be a single string; include working directory by using cmd.exe /c cd ... && ...
+        # We also set COREPY_RUN_AS_SERVICE so `start()` knows it should run the loop.
+        quoted_program = program.replace('"', '')
+        args_str = " ".join(f'"{a}"' for a in argv)
+
         cmd = (
-            f'cmd.exe /c "set COREPY_RUN_AS_SERVICE=1 && '
+            'cmd.exe /c "'
+            'set COREPY_RUN_AS_SERVICE=1 && '
             f'set COREPY_SERVICE_LABEL={name} && '
-            f'cd /d {workdir} && \\"{python_exe}\\" \\"{entry}\\" --start"'
+            f'cd /d "{workdir}" && '
+            f'"{quoted_program}" {args_str}'
+            '"'
         )
 
         # Create service (requires admin)
-        r = subprocess.run(["sc", "create", name, f"binPath=", cmd, "start=", "auto"], capture_output=True, text=True)
+        r = subprocess.run(
+            ["sc", "create", name, "binPath=", cmd, "start=", "auto"],
+            capture_output=True,
+            text=True,
+        )
         if r.returncode != 0:
             raise RuntimeError(f"sc create failed: {(r.stdout or '') + (r.stderr or '')}")
 
@@ -819,7 +829,7 @@ class Service:
 
     def _install_macos_launchd(self) -> None:
         label = self._service_label()
-        python_exe, entry, workdir = self._entry_command()
+        program, argv, workdir = self._service_command("start")
         plist_path = self._macos_plist_path()
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         # Ensure logs directory exists
@@ -835,10 +845,9 @@ class Service:
             f"  <key>Label</key><string>{label}</string>\n"
             "  <key>ProgramArguments</key>\n"
             "  <array>\n"
-            f"    <string>{python_exe}</string>\n"
-            f"    <string>{entry}</string>\n"
-            "    <string>--start</string>\n"
-            "  </array>\n"
+            f"    <string>{program}</string>\n"
+            + "".join(f"    <string>{a}</string>\n" for a in argv)
+            + "  </array>\n"
             f"  <key>WorkingDirectory</key><string>{workdir}</string>\n"
             "  <key>EnvironmentVariables</key>\n"
             "  <dict>\n"
@@ -874,3 +883,51 @@ class Service:
                 pass
 
         self._log(f"Uninstalled launchd LaunchAgent: {label}")
+
+    def _service_command(self, action: str) -> tuple[str, list[str], str]:
+        """Return (program, argv, working_dir) for service manager registration.
+
+        Supports both source runs (python + entry script) and frozen bundles (.exe/.app).
+
+        Environment overrides:
+          - COREPY_SERVICE_EXECUTABLE: absolute/relative path to the executable to register
+            (useful to force a sibling *-cli.exe on Windows).
+        """
+        action = (action or "").strip().lstrip("-")
+        if action not in ("start", "stop"):
+            raise ValueError(f"Invalid service action: {action}")
+
+        # Frozen bundle: run the executable directly.
+        if getattr(sys, "frozen", False):
+            exe_path = Path(sys.executable).expanduser()
+
+            # Optional override (preferred for Windows to target a console *-cli.exe)
+            override = (os.environ.get("COREPY_SERVICE_EXECUTABLE") or "").strip().strip('"')
+            if override:
+                ov = Path(override).expanduser()
+                if not ov.is_absolute():
+                    ov = (Path.cwd() / ov).resolve()
+                if ov.exists():
+                    exe_path = ov
+
+            # Best-effort Windows: if running GUI exe, prefer sibling "-cli.exe".
+            if sys.platform.startswith("win"):
+                try:
+                    s = str(exe_path)
+                    if s.lower().endswith(".exe") and not s.lower().endswith("-cli.exe"):
+                        cand = Path(s[:-4] + "-cli.exe")
+                        if cand.exists():
+                            exe_path = cand
+                except Exception:
+                    pass
+
+            program = str(exe_path)
+            workdir = str(exe_path.parent)
+            argv = [f"--{action}"]
+            return program, argv, workdir
+
+        # Source run: python + entrypoint
+        python_exe, entry, workdir = self._entry_command()
+        program = python_exe
+        argv = [entry, f"--{action}"]
+        return program, argv, workdir
