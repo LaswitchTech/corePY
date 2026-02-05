@@ -406,14 +406,33 @@ class Share:
         self._log_debug("Executing: " + " ".join(printable))
 
         try:
-            completed = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            # On Windows, launching console utilities from a GUI process can flash a console window.
+            # Use CREATE_NO_WINDOW / SW_HIDE best-effort to avoid visible windows.
+            run_kwargs: Dict[str, object] = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "timeout": timeout,
+                "check": False,
+                "stdin": subprocess.DEVNULL,
+            }
+
+            if platform.system().lower() == "windows":
+                # Hide console window (best-effort)
+                create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if create_no_window:
+                    run_kwargs["creationflags"] = int(create_no_window)
+
+                # Some Windows builds still flash; STARTUPINFO can help in many cases.
+                try:
+                    si = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+                    si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+                    si.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+                    run_kwargs["startupinfo"] = si
+                except Exception:
+                    pass
+
+            completed = subprocess.run(cmd, **run_kwargs)  # type: ignore[arg-type]
         except FileNotFoundError as e:
             raise ShareError(f"Required executable not found: {cmd[0]}") from e
         except subprocess.TimeoutExpired as e:
