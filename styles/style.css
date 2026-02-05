@@ -1,8 +1,20 @@
-QDialog, QMessageBox, QProgressDialog, QTabWidget, QTabWidget::pane {
+QDialog, QMessageBox, QProgressDialog, QTabWidget, QTabWidget::pane, QGroupBox, QGroupBox::title {
     background-color: #393939;
     color: #FFFFFF;
     font-family: Arial, sans-serif;
     font-size: 14px;
+}
+
+QGroupBox {
+    border: 1px solid #76797C;
+    border-radius: 5px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 6px;
 }
 
 QTabWidget::pane {
@@ -13,7 +25,7 @@ QTabWidget::pane {
     top: -1px;
 }
 
-QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab {
+QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab, QPlainTextEdit {
     font-size: 14px;
     border: 1px solid #76797C;
     border-radius: 5px;
@@ -21,13 +33,13 @@ QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabB
     margin: 5px 0px;
 }
 
-QLineEdit, QTextEdit, QComboBox, QSpinBox {
+QLineEdit, QTextEdit, QComboBox, QSpinBox, QPlainTextEdit {
     background-color: #212121;
     color: #FFFFFF;
     width: 300px;
 }
 
-QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus {
+QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {
     border: 1px solid #0d6efd;
 }
 

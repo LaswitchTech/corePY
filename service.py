@@ -1385,9 +1385,6 @@ class ServiceManagerDialog(QDialog):
         self.setStyleSheet(
             (self.styleSheet() or "")
             + "\n" +
-            "QGroupBox { color: #FFFFFF; border: 1px solid #76797C; border-radius: 5px; margin-top: 14px; }\n"
-            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 6px; color: #FFFFFF; }\n"
-            "QPlainTextEdit { background-color: #212121; color: #FFFFFF; border: 1px solid #76797C; border-radius: 5px; }\n"
             "QTabWidget::pane { background-color: #414141; border: 1px solid #76797C; border-radius: 5px; }\n"
         )
 
