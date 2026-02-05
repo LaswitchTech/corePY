@@ -88,6 +88,7 @@ class Share:
         self._last_probe_message: Optional[str] = None
         self._last_windows_drive: Optional[str] = None
         self._last_windows_junction: Optional[str] = None
+        self._last_windows_unc: Optional[str] = None
 
     # ---------------------------------------------------------------------
     # Public API
@@ -145,6 +146,7 @@ class Share:
             raise ShareError(f"Unsupported protocol: {protocol}. Supported protocol(s): smb")
 
         # Ensure mountpoint exists for directory-based mounts
+        # On Windows, directory mounts are implemented as symlinks and any pre-created empty directory will be replaced.
         if not self._is_windows_drive_letter(mount_point):
             Path(mount_point).mkdir(parents=True, exist_ok=True)
 
@@ -175,16 +177,17 @@ class Share:
 
         system = platform.system().lower()
         if system == "windows":
-            # If we created a junction directory, remove it first, then disconnect the drive mapping.
-            drive = None
+            # If we created a directory symlink, remove it first, then disconnect.
+            drive: Optional[str] = None
+            unc: Optional[str] = None
 
             if mp and not self._is_windows_drive_letter(mp):
-                # Directory-style mount (junction)
+                # Directory-style mount (symlink)
                 junction = mp
-                drive = self._last_windows_drive
+                unc = self._last_windows_unc
                 try:
                     if junction and os.path.exists(junction):
-                        # Remove junction directory (best-effort)
+                        # Remove symlink directory (best-effort)
                         self._run(["cmd", "/c", "rmdir", "/S", "/Q", junction], timeout=timeout)
                 except Exception:
                     pass
@@ -196,9 +199,14 @@ class Share:
                 # Example: net use Z: /delete /y
                 self._run(["net", "use", drive, "/delete", "/y"], timeout=timeout)
 
+            if unc:
+                # Example: net use \\server\Share /delete /y
+                self._run(["net", "use", unc, "/delete", "/y"], timeout=timeout)
+
             # Clear remembered mapping
             self._last_windows_drive = None
             self._last_windows_junction = None
+            self._last_windows_unc = None
 
             ok_after, msg_after = self._probe_mount(mp, timeout=min(5, timeout))
             self._log_debug(f"Share post-unmount probe: mount_point={mp} ok={ok_after} msg={msg_after}")
@@ -231,65 +239,99 @@ class Share:
         if system == "windows":
             self._backend = "native_smb_windows"
 
-            # `net use` supports mapping to a drive letter (recommended).
+            # `net use` supports mapping to a drive letter.
             # If the caller provided a directory path, we:
-            #   1) map the share to an available drive letter
-            #   2) create a directory junction at mount_point pointing to that drive
+            #   1) create an authenticated connection to the UNC path (no drive letter)
+            #   2) create a directory symlink at mount_point pointing to that UNC path
+            #
+            # IMPORTANT: `mklink /J` (junction) cannot target mapped drives / UNC paths
+            # and will fail with "Local volumes are required...". For UNC we must use
+            # a directory symbolic link (`mklink /D`).
+
             unc = self._smb_unc(target.host, target.path)
 
-            def _pick_free_drive_letter() -> str:
-                # Prefer Z: backward to D:
-                for code in range(ord("Z"), ord("D") - 1, -1):
-                    letter = chr(code) + ":"
-                    if not os.path.exists(letter + "\\"):
-                        return letter
-                raise ShareError("No free drive letter available for SMB mapping")
-
             junction_path: Optional[str] = None
-            drive_letter: str
+            drive_letter: Optional[str] = None
 
             if self._is_windows_drive_letter(mount_point):
+                # Drive-letter style mount
                 drive_letter = mount_point.upper()
-            else:
-                drive_letter = _pick_free_drive_letter()
-                junction_path = mount_point
 
-            cmd = ["net", "use", drive_letter, unc]
+                cmd = ["net", "use", drive_letter, unc]
+                if auth.username:
+                    if auth.domain:
+                        cmd += [f"/user:{auth.domain}\\{auth.username}"]
+                    else:
+                        cmd += [f"/user:{auth.username}"]
+                if auth.password is not None:
+                    cmd += [auth.password]
+                cmd += ["/persistent:no"]
+
+                # Retry once on 1219 by clearing existing connections to that host
+                try:
+                    self._run(cmd, timeout=timeout)
+                except ShareError as e:
+                    if "1219" in str(e):
+                        self._log_debug(f"Windows SMB: detected error 1219; clearing connections to host {target.host} and retrying")
+                        try:
+                            self._run(["net", "use", f"\\\\{target.host}\\*", "/delete", "/y"], timeout=timeout)
+                        except Exception:
+                            pass
+                        self._run(cmd, timeout=timeout)
+                    else:
+                        raise
+
+                self._last_windows_drive = drive_letter
+                self._last_windows_junction = None
+                self._last_windows_unc = None
+                return
+
+            # Directory-style mount (symlink to UNC)
+            junction_path = mount_point
+
+            # 1) Create (or refresh) an authenticated connection to the UNC path
+            #    without assigning a drive letter.
+            cmd = ["net", "use", unc]
             if auth.username:
                 if auth.domain:
                     cmd += [f"/user:{auth.domain}\\{auth.username}"]
                 else:
                     cmd += [f"/user:{auth.username}"]
-            if auth.password:
-                cmd += [auth.password]
+            # Avoid interactive password prompt: pass empty string when password is None.
+            cmd += [(auth.password if auth.password is not None else "")]
             cmd += ["/persistent:no"]
 
-            self._run(cmd, timeout=timeout)
-
-            # If the caller requested a directory mount, create a junction to the mapped drive.
-            if junction_path:
-                try:
-                    # Ensure the junction does not already exist.
-                    if os.path.exists(junction_path):
-                        # If it's an empty dir we created earlier, remove it.
-                        self._run(["cmd", "/c", "rmdir", "/S", "/Q", junction_path], timeout=timeout)
-
-                    # Junctions do not require admin privileges and behave like a directory.
-                    target_root = drive_letter + "\\"
-                    self._run(["cmd", "/c", "mklink", "/J", junction_path, target_root], timeout=timeout)
-
-                    self._last_windows_drive = drive_letter
-                    self._last_windows_junction = junction_path
-                except Exception as e:
-                    # Roll back the drive mapping on failure
+            try:
+                self._run(cmd, timeout=timeout)
+            except ShareError as e:
+                if "1219" in str(e):
+                    self._log_debug(f"Windows SMB: detected error 1219; clearing connections to host {target.host} and retrying")
                     try:
-                        self._run(["net", "use", drive_letter, "/delete", "/y"], timeout=timeout)
+                        self._run(["net", "use", f"\\\\{target.host}\\*", "/delete", "/y"], timeout=timeout)
                     except Exception:
                         pass
+                    self._run(cmd, timeout=timeout)
+                else:
                     raise
-            else:
-                self._last_windows_drive = drive_letter
-                self._last_windows_junction = None
+
+            # 2) Create a directory symlink pointing to the UNC path.
+            try:
+                if os.path.exists(junction_path):
+                    self._run(["cmd", "/c", "rmdir", "/S", "/Q", junction_path], timeout=timeout)
+
+                # NOTE: Creating symlinks may require admin privileges unless Developer Mode is enabled.
+                self._run(["cmd", "/c", "mklink", "/D", junction_path, unc], timeout=timeout)
+
+                self._last_windows_drive = None
+                self._last_windows_junction = junction_path
+                self._last_windows_unc = unc
+            except Exception:
+                # Best-effort rollback of the UNC connection
+                try:
+                    self._run(["net", "use", unc, "/delete", "/y"], timeout=timeout)
+                except Exception:
+                    pass
+                raise
 
             return
 
