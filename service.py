@@ -1456,9 +1456,8 @@ class ServiceManagerDialog(QDialog):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
-        right_layout.addWidget(controls)
-        right_layout.addWidget(logs_box)
-        right_layout.addStretch(1)
+        right_layout.addWidget(controls, 0)
+        right_layout.addWidget(logs_box, 1)
 
         root.addWidget(right, 3)
 
