@@ -1438,8 +1438,6 @@ class ServiceManagerDialog(QDialog):
         status_form.addRow("Running:", self._lbl_running)
         status_form.addRow("PID:", self._lbl_pid)
         status_form.addRow("NSSM:", self._lbl_nssm)
-        status_form.addRow("Stdout log:", self._lbl_stdout)
-        status_form.addRow("Stderr log:", self._lbl_stderr)
 
         # -----------------------------
         # Root layout: 2 columns
