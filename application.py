@@ -219,6 +219,10 @@ class Application(QApplication):
         return self._configuration
 
     @property
+    def service(self) -> Service:
+        return self._service
+
+    @property
     def mainWindow(self):
         return self._mainWindow
 
