@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import platform
 import ctypes
+import json
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -753,7 +754,11 @@ class Service:
         label = self._service_label()
         try:
             if sys.platform.startswith("win"):
-                subprocess.run(["sc", "start", label], check=False)
+                # Prefer NSSM if bundled
+                if self._windows_has_nssm():
+                    self._windows_nssm_run(["start", label])
+                else:
+                    subprocess.run(["sc", "start", label], check=False)
                 self._log(f"Requested start for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -789,7 +794,11 @@ class Service:
         label = self._service_label()
         try:
             if sys.platform.startswith("win"):
-                subprocess.run(["sc", "stop", label], check=False)
+                # Prefer NSSM if bundled
+                if self._windows_has_nssm():
+                    self._windows_nssm_run(["stop", label])
+                else:
+                    subprocess.run(["sc", "stop", label], check=False)
                 self._log(f"Requested stop for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -806,9 +815,12 @@ class Service:
         label = self._service_label()
         try:
             if sys.platform.startswith("win"):
-                subprocess.run(["sc", "stop", label], check=False)
-                time.sleep(0.5)
-                subprocess.run(["sc", "start", label], check=False)
+                if self._windows_has_nssm():
+                    self._windows_nssm_run(["restart", label])
+                else:
+                    subprocess.run(["sc", "stop", label], check=False)
+                    time.sleep(0.5)
+                    subprocess.run(["sc", "start", label], check=False)
                 self._log(f"Requested restart for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -826,51 +838,96 @@ class Service:
     # ------------------------------------------------------------------
 
     def _install_windows_service(self) -> None:
+        """Install Windows service.
+
+        Prefer NSSM when available (bundled in corePY).
+
+        Why:
+        - `sc create` + a long `cmd.exe /c ...` binPath is fragile.
+        - NSSM hosts a normal console program and reports service state properly.
+        """
         name = self._service_label()
 
-        # Installing a Windows service requires elevation. We cannot elevate an
-        # already-running process; instead, we relaunch with UAC and return.
+        # Installing a Windows service requires elevation.
         if not self._windows_is_admin():
             self._log("Admin privileges required to install the service. Requesting elevation...", level="info")
             if self._windows_relaunch_elevated(sys.argv):
                 return
             raise RuntimeError("Admin privileges required to install the service.")
 
+        # Use NSSM if present.
+        if not self._windows_has_nssm():
+            raise RuntimeError(
+                "NSSM was not found. Expected one of: "
+                "src/bin/nssm/windows/x86/nssm.exe or src/bin/nssm/windows/x86_64/nssm.exe (or the same under core/src/bin)."
+            )
+
+        # Resolve the command the service should run.
         program, argv, workdir = self._service_command("start")
 
-        # binPath must be a single string; include working directory by using cmd.exe /c cd ... && ...
-        # We also set COREPY_RUN_AS_SERVICE so `start()` knows it should run the loop.
-        quoted_program = program.replace('"', '')
-        args_str = " ".join(f'"{a}"' for a in argv)
+        # Install directory: stable place for logs and (optionally) copied binaries.
+        install_dir = self._windows_install_dir()
+        install_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = (
-            'cmd.exe /c "'
-            'set COREPY_RUN_AS_SERVICE=1 && '
-            f'set COREPY_SERVICE_LABEL={name} && '
-            f'cd /d "{workdir}" && '
-            f'"{quoted_program}" {args_str}'
-            '"'
-        )
+        logs_dir = install_dir.parent / "log"
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create service (requires admin)
-        r = subprocess.run(
-            ["sc", "create", name, "binPath=", cmd, "start=", "auto"],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"sc create failed: {(r.stdout or '') + (r.stderr or '')}")
+        stdout_log = logs_dir / f"{name}.out.log"
+        stderr_log = logs_dir / f"{name}.err.log"
 
-        self._log(f"Installed Windows service: {name}")
+        # In frozen mode, it's safer to point NSSM at a stable path.
+        # If we're already running from Program Files/ProgramData, we can use it directly.
+        # Otherwise (common during dev / unpackaged runs), we still allow it, but you may
+        # want to set COREPY_SERVICE_EXECUTABLE to an installed *-cli.exe.
+        app_program = program
+        app_dir = workdir
+
+        # Install (create) service
+        self._windows_nssm_run(["install", name, app_program] + argv)
+
+        # Configure working directory
+        self._windows_nssm_run(["set", name, "AppDirectory", app_dir])
+
+        # Environment variables so `start()` knows this is the service process
+        env_extra = "COREPY_RUN_AS_SERVICE=1\r\n" + f"COREPY_SERVICE_LABEL={name}" + "\r\n"
+        self._windows_nssm_run(["set", name, "AppEnvironmentExtra", env_extra])
+
+        # Logging
+        self._windows_nssm_run(["set", name, "AppStdout", str(stdout_log)])
+        self._windows_nssm_run(["set", name, "AppStderr", str(stderr_log)])
+        self._windows_nssm_run(["set", name, "AppRotateFiles", "1"])
+        self._windows_nssm_run(["set", name, "AppRotateOnline", "1"])
+        self._windows_nssm_run(["set", name, "AppRotateSeconds", "86400"])
+        self._windows_nssm_run(["set", name, "AppRotateBytes", str(10 * 1024 * 1024)])
+
+        # Startup
+        self._windows_nssm_run(["set", name, "Start", "SERVICE_AUTO_START"])
+
+        # Restart policy
+        self._windows_nssm_run(["set", name, "AppExit", "Default", "Restart"])
+
+        self._log(f"Installed Windows service (NSSM): {name}")
 
     def _uninstall_windows_service(self) -> None:
         name = self._service_label()
+
         # Uninstalling a Windows service requires elevation.
         if not self._windows_is_admin():
             self._log("Admin privileges required to uninstall the service. Requesting elevation...", level="info")
             if self._windows_relaunch_elevated(sys.argv):
                 return
             raise RuntimeError("Admin privileges required to uninstall the service.")
+
+        # Prefer NSSM removal if available
+        if self._windows_has_nssm():
+            # Stop (best-effort)
+            self._windows_nssm_run(["stop", name], check=False)
+            # remove <name> confirm
+            self._windows_nssm_run(["remove", name, "confirm"], check=False)
+            self._log(f"Uninstalled Windows service (NSSM): {name}")
+            return
+
+        # Fallback to sc
         subprocess.run(["sc", "stop", name], check=False)
         r = subprocess.run(["sc", "delete", name], capture_output=True, text=True)
         if r.returncode != 0:
@@ -989,3 +1046,97 @@ class Service:
         program = python_exe
         argv = [entry, f"--{action}"]
         return program, argv, workdir
+
+    def _windows_is_64bit(self) -> bool:
+        try:
+            return platform.machine().endswith("64") or ("PROGRAMFILES(X86)" in os.environ)
+        except Exception:
+            return True
+
+    def _windows_install_dir(self) -> Path:
+        """Stable per-machine install dir for service-related assets/logs."""
+        base = Path(os.environ.get("PROGRAMDATA", r"C:\\ProgramData"))
+        return base / (self._app_name() or "corepy") / "bin"
+
+    def _windows_nssm_candidates(self) -> list[Path]:
+        """Return candidate NSSM locations (supports both corePY and vendored corePY inside apps)."""
+        # Running inside corePY source tree
+        here = Path(__file__).resolve()
+        core_dir = here.parent  # .../src/core
+
+        rels = [
+            Path("src") / "bin" / "nssm" / "windows" / "x86" / "nssm.exe",
+            Path("src") / "bin" / "nssm" / "windows" / "x86_64" / "nssm.exe",
+            Path("bin") / "nssm" / "windows" / "x86" / "nssm.exe",
+            Path("bin") / "nssm" / "windows" / "x86_64" / "nssm.exe",
+            # Vendored corePY inside another repo (e.g. Replicator: src/core/src/bin/...)
+            Path("src") / "core" / "src" / "bin" / "nssm" / "windows" / "x86" / "nssm.exe",
+            Path("src") / "core" / "src" / "bin" / "nssm" / "windows" / "x86_64" / "nssm.exe",
+        ]
+
+        roots = [
+            Path.cwd(),
+            core_dir.parent,                # .../src
+            core_dir.parent.parent,         # project root
+            here.parent.parent,             # .../src (safe-ish)
+        ]
+
+        # If frozen, also look beside the executable
+        if getattr(sys, "frozen", False):
+            roots.append(Path(sys.executable).resolve().parent)
+
+        out: list[Path] = []
+        for root in roots:
+            for rel in rels:
+                p = (root / rel).resolve()
+                out.append(p)
+        return out
+
+    def _windows_find_nssm(self) -> Optional[Path]:
+        if not sys.platform.startswith("win"):
+            return None
+
+        # Allow explicit override
+        override = (os.environ.get("COREPY_NSSM") or "").strip().strip('"')
+        if override:
+            p = Path(override).expanduser()
+            if not p.is_absolute():
+                p = (Path.cwd() / p).resolve()
+            if p.exists():
+                return p
+
+        want_64 = self._windows_is_64bit()
+        # Prefer matching arch first
+        preferred = ["x86_64"] if want_64 else ["x86"]
+        preferred += ["x86"] if want_64 else ["x86_64"]
+
+        candidates = self._windows_nssm_candidates()
+        for arch in preferred:
+            for p in candidates:
+                if f"\\{arch}\\" in str(p).lower() and p.exists():
+                    return p
+
+        # Any existing
+        for p in candidates:
+            if p.exists():
+                return p
+
+        return None
+
+    def _windows_has_nssm(self) -> bool:
+        return bool(self._windows_find_nssm())
+
+    def _windows_nssm_run(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+        """Run NSSM with the given args.
+
+        Uses the bundled NSSM, and captures output for better error messages.
+        """
+        nssm = self._windows_find_nssm()
+        if not nssm:
+            raise RuntimeError("NSSM not found (COREPY_NSSM override not set and no bundled binary found).")
+
+        cmd = [str(nssm)] + list(args)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if check and r.returncode != 0:
+            raise RuntimeError(f"nssm failed: {cmd}\n{(r.stdout or '') + (r.stderr or '')}")
+        return r
