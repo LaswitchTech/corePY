@@ -1,5 +1,5 @@
 QDialog, QMessageBox, QProgressDialog, QTabWidget, QTabWidget::pane, QGroupBox, QGroupBox::title {
-    background-color: #393939;
+    background-color: #212121;
     color: #FFFFFF;
     font-family: Arial, sans-serif;
     font-size: 14px;
@@ -290,7 +290,7 @@ QPushButton:pressed, QTabBar::tab:pressed, QTabBar::tab:selected {
 
 #MsgBox {
     min-width: 400px;
-    background-color: #393939;
+    background-color: #212121;
     color: #FFFFFF;
     padding: 10px;
     font-size: 14px;
@@ -298,7 +298,7 @@ QPushButton:pressed, QTabBar::tab:pressed, QTabBar::tab:selected {
 
 #Client {
     min-width: 400px;
-    background-color: #393939;
+    background-color: #212121;
     color: #FFFFFF;
     padding: 10px;
     font-size: 14px;
