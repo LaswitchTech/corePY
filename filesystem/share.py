@@ -22,9 +22,10 @@ Notes
 * Many mount operations require elevated privileges depending on target path.
   This class does not force privilege escalation; you can pass `elevate=True`
   to prefix commands with sudo on Unix-like systems.
-* On Windows, SMB mounting via `net use` maps network resources, typically to
-  a drive letter. This class supports mapping to a drive letter via
-  `mount_point='Z:'`.
+* On Windows, SMB mounting via `net use` maps network resources to a drive letter.
+  - If you pass a drive letter (e.g. `mount_point='Z:'`), it will map directly.
+  - If you pass a directory path, corePY will map the share to a free drive letter
+    and create a directory junction at `mount_point` pointing to that drive.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote, unquote
 
 
 class ShareError(RuntimeError):
@@ -64,6 +66,13 @@ class ShareTarget:
             return "smb"
         return p
 
+    def decoded_path(self) -> str:
+        # Accept either raw share names or percent-encoded ones (e.g. "Test%20with%20spaces").
+        try:
+            return unquote(self.path or "")
+        except Exception:
+            return self.path or ""
+
 
 class Share:
     """Mount and unmount SMB shares."""
@@ -77,6 +86,8 @@ class Share:
         self._last_mount_point: Optional[str] = None
         self._last_probe_ok: Optional[bool] = None
         self._last_probe_message: Optional[str] = None
+        self._last_windows_drive: Optional[str] = None
+        self._last_windows_junction: Optional[str] = None
 
     # ---------------------------------------------------------------------
     # Public API
@@ -125,6 +136,9 @@ class Share:
         target = ShareTarget(protocol=protocol, host=host, path=remote or "", port=port)
         p = target.normalized_protocol()
 
+        # Normalize remote path early (accept percent-encoded share names)
+        target.path = target.decoded_path()
+
         self._log_debug(f"Mount request: protocol={p} host={host} remote={remote} mount_point={mount_point}")
 
         if p != "smb":
@@ -161,8 +175,31 @@ class Share:
 
         system = platform.system().lower()
         if system == "windows":
-            # Example: net use Z: /delete /y
-            self._run(["net", "use", mp, "/delete", "/y"], timeout=timeout)
+            # If we created a junction directory, remove it first, then disconnect the drive mapping.
+            drive = None
+
+            if mp and not self._is_windows_drive_letter(mp):
+                # Directory-style mount (junction)
+                junction = mp
+                drive = self._last_windows_drive
+                try:
+                    if junction and os.path.exists(junction):
+                        # Remove junction directory (best-effort)
+                        self._run(["cmd", "/c", "rmdir", "/S", "/Q", junction], timeout=timeout)
+                except Exception:
+                    pass
+            else:
+                # Drive-letter mount
+                drive = mp
+
+            if drive:
+                # Example: net use Z: /delete /y
+                self._run(["net", "use", drive, "/delete", "/y"], timeout=timeout)
+
+            # Clear remembered mapping
+            self._last_windows_drive = None
+            self._last_windows_junction = None
+
             ok_after, msg_after = self._probe_mount(mp, timeout=min(5, timeout))
             self._log_debug(f"Share post-unmount probe: mount_point={mp} ok={ok_after} msg={msg_after}")
             return
@@ -193,10 +230,31 @@ class Share:
 
         if system == "windows":
             self._backend = "native_smb_windows"
-            # `net use` expects a UNC path and (optionally) a drive letter as mount_point
-            # Example: net use Z: \\server\Share /user:DOMAIN\\user password
+
+            # `net use` supports mapping to a drive letter (recommended).
+            # If the caller provided a directory path, we:
+            #   1) map the share to an available drive letter
+            #   2) create a directory junction at mount_point pointing to that drive
             unc = self._smb_unc(target.host, target.path)
-            cmd = ["net", "use", mount_point, unc]
+
+            def _pick_free_drive_letter() -> str:
+                # Prefer Z: backward to D:
+                for code in range(ord("Z"), ord("D") - 1, -1):
+                    letter = chr(code) + ":"
+                    if not os.path.exists(letter + "\\"):
+                        return letter
+                raise ShareError("No free drive letter available for SMB mapping")
+
+            junction_path: Optional[str] = None
+            drive_letter: str
+
+            if self._is_windows_drive_letter(mount_point):
+                drive_letter = mount_point.upper()
+            else:
+                drive_letter = _pick_free_drive_letter()
+                junction_path = mount_point
+
+            cmd = ["net", "use", drive_letter, unc]
             if auth.username:
                 if auth.domain:
                     cmd += [f"/user:{auth.domain}\\{auth.username}"]
@@ -205,7 +263,34 @@ class Share:
             if auth.password:
                 cmd += [auth.password]
             cmd += ["/persistent:no"]
+
             self._run(cmd, timeout=timeout)
+
+            # If the caller requested a directory mount, create a junction to the mapped drive.
+            if junction_path:
+                try:
+                    # Ensure the junction does not already exist.
+                    if os.path.exists(junction_path):
+                        # If it's an empty dir we created earlier, remove it.
+                        self._run(["cmd", "/c", "rmdir", "/S", "/Q", junction_path], timeout=timeout)
+
+                    # Junctions do not require admin privileges and behave like a directory.
+                    target_root = drive_letter + "\\"
+                    self._run(["cmd", "/c", "mklink", "/J", junction_path, target_root], timeout=timeout)
+
+                    self._last_windows_drive = drive_letter
+                    self._last_windows_junction = junction_path
+                except Exception as e:
+                    # Roll back the drive mapping on failure
+                    try:
+                        self._run(["net", "use", drive_letter, "/delete", "/y"], timeout=timeout)
+                    except Exception:
+                        pass
+                    raise
+            else:
+                self._last_windows_drive = drive_letter
+                self._last_windows_junction = None
+
             return
 
         if system == "darwin":
@@ -220,9 +305,10 @@ class Share:
                     userinfo += ":" + self._url_escape(auth.password)
                 userinfo += "@"
 
-            # mount_smbfs wants //host/share[/subpath]
-            # If you pass Share/dir, it will mount at that subpath (works for many servers).
-            url = f"//{userinfo}{target.host}/{target.path.lstrip('/')}"
+            # For SMB URLs, the path portion must be URL-encoded (but keep '/').
+            path = (target.path or "").lstrip("/")
+            path = quote(path, safe="/")
+            url = f"//{userinfo}{target.host}/{path}"
             if read_only:
                 cmd = (["sudo"] if elevate else []) + [mount_smbfs, "-o", "ro", url, mount_point]
             else:
@@ -385,11 +471,12 @@ class Share:
         return len(s) == 2 and s[1] == ":" and s[0].isalpha()
 
     def _smb_unc(self, host: str, remote: str) -> str:
-        remote = (remote or "").replace("/", "\\").lstrip("\\")
+        remote = unquote(remote or "")
+        remote = remote.replace("/", "\\").lstrip("\\")
         return f"\\\\{host}\\{remote}"
 
     def _split_share_and_subpath(self, remote: str) -> Tuple[str, str]:
-        r = (remote or "").lstrip("/")
+        r = unquote(remote or "").lstrip("/")
         if not r:
             return "", ""
         parts = r.split("/")
