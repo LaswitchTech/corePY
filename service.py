@@ -1369,12 +1369,12 @@ class ServiceManagerDialog(QDialog):
         self._tail = _TailReader()
         self._poll_ms = 1000
 
-        self.setWindowTitle(f"{self._svc._app_name()} – Service")
+        self.setWindowTitle("Service Manager")
         self.setModal(True)
         self.resize(980, 560)
 
         # -----------------------------
-        # Logs (left column)
+        # Logs (right column, under controls)
         # -----------------------------
         self._tabs = QTabWidget()
 
@@ -1417,7 +1417,7 @@ class ServiceManagerDialog(QDialog):
         self._controls_layout.addStretch(1)
 
         # -----------------------------
-        # Status (right column, under controls)
+        # Status (left column)
         # -----------------------------
         self._lbl_name = QLabel("")
         self._lbl_label = QLabel("")
@@ -1443,22 +1443,26 @@ class ServiceManagerDialog(QDialog):
 
         # -----------------------------
         # Root layout: 2 columns
+        #   Left  (1/4): Status
+        #   Right (3/4): Controls + Logs
         # -----------------------------
         root = QHBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(10)
 
-        root.addWidget(logs_box, 3)
+        # Left column (Status)
+        root.addWidget(status_box, 1)
 
+        # Right column (Controls + Logs)
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
         right_layout.addWidget(controls)
-        right_layout.addWidget(status_box)
+        right_layout.addWidget(logs_box)
         right_layout.addStretch(1)
 
-        root.addWidget(right, 1)
+        root.addWidget(right, 3)
 
         # Poll timer (status + logs)
         self._timer = QTimer(self)
