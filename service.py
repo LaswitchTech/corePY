@@ -1372,6 +1372,16 @@ class ServiceManagerDialog(QDialog):
         self.setWindowTitle("Service Manager")
         self.setModal(True)
         self.resize(980, 560)
+        # Ensure GroupBox titles and log views respect the dark theme on Windows.
+        # (Windows styles sometimes keep GroupBox titles black unless explicitly styled.)
+        self.setStyleSheet(
+            (self.styleSheet() or "")
+            + "\n" +
+            "QGroupBox { color: #FFFFFF; border: 1px solid #76797C; border-radius: 5px; margin-top: 14px; }\n"
+            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 6px; color: #FFFFFF; }\n"
+            "QPlainTextEdit { background-color: #212121; color: #FFFFFF; border: 1px solid #76797C; border-radius: 5px; }\n"
+            "QTabWidget::pane { background-color: #414141; border: 1px solid #76797C; border-radius: 5px; }\n"
+        )
 
         # -----------------------------
         # Logs (right column, under controls)
@@ -1394,8 +1404,9 @@ class ServiceManagerDialog(QDialog):
         # Controls (right column)
         # -----------------------------
         controls = QGroupBox("Controls")
-        self._controls_layout = QVBoxLayout(controls)
-        self._controls_layout.setSpacing(8)
+        self._controls_layout = QHBoxLayout(controls)
+        self._controls_layout.setSpacing(10)
+        self._controls_layout.setContentsMargins(10, 10, 10, 10)
 
         # Use Form.button when available (for icons); fallback to QPushButton.
         def _mk_btn(label: str, fn: Callable[[], None], icon: str = ""):
@@ -1461,6 +1472,9 @@ class ServiceManagerDialog(QDialog):
 
         root.addWidget(right, 3)
 
+        # Avoid UI flashing on Windows by only updating widgets when values actually change.
+        self._last_snapshot: dict[str, object] = {}
+        self._refresh_tick = 0
         # Poll timer (status + logs)
         self._timer = QTimer(self)
         self._timer.setInterval(self._poll_ms)
@@ -1515,34 +1529,55 @@ class ServiceManagerDialog(QDialog):
             running = self._svc._is_service_active() if installed else self._svc._is_running()
             pid = self._svc._read_pidfile() if not installed else None
 
-            self._lbl_name.setText(name)
-            self._lbl_label.setText(label)
-            self._lbl_mgr.setText(self._manager_name())
-            self._set_bool_label(self._lbl_installed, installed)
-            self._set_bool_label(self._lbl_running, running)
-            self._lbl_pid.setText(str(pid) if pid else "-")
-
             # NSSM path (Windows only)
             if sys.platform.startswith("win"):
                 try:
-                    p = self._svc._windows_find_nssm()
-                    self._lbl_nssm.setText(str(p) if p else "(not found)")
+                    nssm_path = self._svc._windows_find_nssm()
+                    nssm_text = str(nssm_path) if nssm_path else "(not found)"
                 except Exception:
-                    self._lbl_nssm.setText("(unknown)")
+                    nssm_text = "(unknown)"
             else:
-                self._lbl_nssm.setText("-")
+                nssm_text = "-"
 
             out_path, err_path = self._log_paths()
-            self._lbl_stdout.setText(out_path if out_path else "(no file log configured)")
-            self._lbl_stderr.setText(err_path if err_path else "(no file log configured)")
+            stdout_text = out_path if out_path else "(no file log configured)"
+            stderr_text = err_path if err_path else "(no file log configured)"
 
-            # Button visibility: only show actions that make sense.
-            self._btn_install.setVisible(not installed)
-            self._btn_uninstall.setVisible(installed)
+            # Snapshot current state to avoid redundant UI updates (prevents flashing on Windows)
+            snap: dict[str, object] = {
+                "name": name,
+                "label": label,
+                "manager": self._manager_name(),
+                "installed": installed,
+                "running": running,
+                "pid": str(pid) if pid else "-",
+                "nssm": nssm_text,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "btn_install": (not installed),
+                "btn_uninstall": installed,
+                "btn_start": (installed and not running),
+                "btn_stop": (installed and running),
+            }
 
-            # Start/Stop only relevant when installed
-            self._btn_start.setVisible(installed and not running)
-            self._btn_stop.setVisible(installed and running)
+            if snap != self._last_snapshot:
+                self._lbl_name.setText(str(snap["name"]))
+                self._lbl_label.setText(str(snap["label"]))
+                self._lbl_mgr.setText(str(snap["manager"]))
+                self._set_bool_label(self._lbl_installed, bool(snap["installed"]))
+                self._set_bool_label(self._lbl_running, bool(snap["running"]))
+                self._lbl_pid.setText(str(snap["pid"]))
+                self._lbl_nssm.setText(str(snap["nssm"]))
+                self._lbl_stdout.setText(str(snap["stdout"]))
+                self._lbl_stderr.setText(str(snap["stderr"]))
+
+                # Button visibility: only show actions that make sense.
+                self._btn_install.setVisible(bool(snap["btn_install"]))
+                self._btn_uninstall.setVisible(bool(snap["btn_uninstall"]))
+                self._btn_start.setVisible(bool(snap["btn_start"]))
+                self._btn_stop.setVisible(bool(snap["btn_stop"]))
+
+                self._last_snapshot = snap
 
             # Show a helpful note in logs pane when file logs aren't available.
             if not out_path and not err_path:
@@ -1552,9 +1587,10 @@ class ServiceManagerDialog(QDialog):
                     "- macOS: logs are written to ~/Library/Logs/<AppName>/.\n"
                     "- Linux: consider using journald (journalctl -u <service>).\n"
                 )
-                if not self._txt_out.toPlainText():
+                # Only set the note once to avoid flicker
+                if self._txt_out.toPlainText().strip() == "":
                     self._txt_out.setPlainText(note)
-                if not self._txt_err.toPlainText():
+                if self._txt_err.toPlainText().strip() == "":
                     self._txt_err.setPlainText(note)
 
         except Exception as e:
@@ -1601,10 +1637,11 @@ class ServiceManagerDialog(QDialog):
     # -----------------------------
 
     def _on_timer(self) -> None:
-        # Keep status and button visibility in sync.
-        self.refresh()
-        # Then append any new log text.
+        # Poll logs frequently, but refresh status less often to reduce UI churn (Windows flashing).
         self._poll_logs()
+        self._refresh_tick = (self._refresh_tick + 1) % 3  # refresh about every ~3 seconds
+        if self._refresh_tick == 0:
+            self.refresh()
 
     # -----------------------------
     # Log polling
