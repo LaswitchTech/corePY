@@ -26,7 +26,7 @@ QTabWidget::pane {
     padding: 10px;
 }
 
-QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab, QPlainTextEdit {
+QLabel, QLineEdit, QTimeEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab, QPlainTextEdit {
     font-size: 14px;
     border: 1px solid #76797C;
     border-radius: 5px;
@@ -34,13 +34,13 @@ QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabB
     margin: 5px 0px;
 }
 
-QLineEdit, QTextEdit, QComboBox, QSpinBox, QPlainTextEdit {
+QLineEdit, QTimeEdit, QTextEdit, QComboBox, QSpinBox, QPlainTextEdit {
     background-color: #212121;
     color: #FFFFFF;
     width: 300px;
 }
 
-QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {
+QLineEdit, QTimeEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {
     border: 1px solid #0d6efd;
 }
 
