@@ -654,6 +654,14 @@ class Service:
     # Cross-platform service manager helpers
     # ------------------------------------------------------------------
 
+    def _run_subprocess(self, args: list[str], **kwargs) -> subprocess.CompletedProcess:
+        if sys.platform.startswith("win"):
+            try:
+                kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
+        return subprocess.run(args, **kwargs)
+
     def _service_label(self) -> str:
         """Stable label used for OS service registration.
 
@@ -739,7 +747,7 @@ class Service:
             if sys.platform.startswith("win"):
                 name = self._service_label()
                 # sc query returns non-zero if missing
-                r = subprocess.run(["sc", "query", name], capture_output=True, text=True)
+                r = self._run_subprocess(["sc", "query", name], capture_output=True, text=True)
                 return r.returncode == 0
             if sys.platform == "darwin":
                 return self._macos_plist_path().exists()
@@ -757,7 +765,7 @@ class Service:
         try:
             if sys.platform.startswith("win"):
                 name = self._service_label()
-                r = subprocess.run(["sc", "query", name], capture_output=True, text=True)
+                r = self._run_subprocess(["sc", "query", name], capture_output=True, text=True)
                 if r.returncode != 0:
                     return False
                 out = (r.stdout or "") + (r.stderr or "")
@@ -796,7 +804,7 @@ class Service:
                 if self._windows_has_nssm():
                     self._windows_nssm_run(["start", label])
                 else:
-                    subprocess.run(["sc", "start", label], check=False)
+                    self._run_subprocess(["sc", "start", label], check=False)
                 self._log(f"Requested start for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -836,7 +844,7 @@ class Service:
                 if self._windows_has_nssm():
                     self._windows_nssm_run(["stop", label])
                 else:
-                    subprocess.run(["sc", "stop", label], check=False)
+                    self._run_subprocess(["sc", "stop", label], check=False)
                 self._log(f"Requested stop for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -856,9 +864,9 @@ class Service:
                 if self._windows_has_nssm():
                     self._windows_nssm_run(["restart", label])
                 else:
-                    subprocess.run(["sc", "stop", label], check=False)
+                    self._run_subprocess(["sc", "stop", label], check=False)
                     time.sleep(0.5)
-                    subprocess.run(["sc", "start", label], check=False)
+                    self._run_subprocess(["sc", "start", label], check=False)
                 self._log(f"Requested restart for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -1420,11 +1428,13 @@ class ServiceManagerDialog(QDialog):
         self._btn_uninstall = _mk_btn("Uninstall", self._on_uninstall, icon="trash")
         self._btn_start = _mk_btn("Start", self._on_start, icon="play")
         self._btn_stop = _mk_btn("Stop", self._on_stop, icon="stop")
+        self._btn_refresh = _mk_btn("Refresh", self.refresh, icon="arrow-clockwise")
 
         self._controls_layout.addWidget(self._btn_install)
         self._controls_layout.addWidget(self._btn_uninstall)
         self._controls_layout.addWidget(self._btn_start)
         self._controls_layout.addWidget(self._btn_stop)
+        self._controls_layout.addWidget(self._btn_refresh)
         self._controls_layout.addStretch(1)
 
         # -----------------------------
@@ -1637,11 +1647,8 @@ class ServiceManagerDialog(QDialog):
     # -----------------------------
 
     def _on_timer(self) -> None:
-        # Poll logs frequently, but refresh status less often to reduce UI churn (Windows flashing).
+        # Only tail logs on a timer. Avoid polling status (may spawn sc/systemctl windows).
         self._poll_logs()
-        self._refresh_tick = (self._refresh_tick + 1) % 3  # refresh about every ~3 seconds
-        if self._refresh_tick == 0:
-            self.refresh()
 
     # -----------------------------
     # Log polling
