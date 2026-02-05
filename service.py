@@ -1419,7 +1419,7 @@ class ServiceManagerDialog(QDialog):
         # Use Form.button when available (for icons); fallback to QPushButton.
         def _mk_btn(label: str, fn: Callable[[], None], icon: str = ""):
             if Form is not None and hasattr(Form, "button"):
-                return Form.button(label, fn, icon=icon)
+                return Form.button(label="", icon=icon, action=fn)
             b = QPushButton(label)
             b.clicked.connect(fn)
             return b
