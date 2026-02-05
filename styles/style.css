@@ -40,7 +40,11 @@ QLineEdit, QTimeEdit, QTextEdit, QComboBox, QSpinBox, QPlainTextEdit {
     width: 300px;
 }
 
-QLineEdit, QTimeEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {
+QTimeEdit {
+    width: 75px;
+}
+
+QLineEdit:focus, QTimeEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {
     border: 1px solid #0d6efd;
 }
 
