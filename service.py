@@ -16,6 +16,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from PyQt5.QtCore import QTimer
+# PyQt5 widgets
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
@@ -29,6 +30,12 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QMessageBox,
 )
+
+# Optional UI helpers (icons/buttons)
+try:
+    from .ui import Form  # type: ignore
+except Exception:  # pragma: no cover
+    Form = None  # type: ignore
 
 
 @dataclass
@@ -1347,7 +1354,7 @@ class ServiceManagerDialog(QDialog):
 
     Focus:
       - Install / Uninstall
-      - Start / Stop / Restart
+      - Start / Stop
       - Status (installed/running)
       - Live-ish log view (stdout/stderr files when available)
 
@@ -1363,10 +1370,53 @@ class ServiceManagerDialog(QDialog):
 
         self.setWindowTitle(f"{self._svc._app_name()} – Service")
         self.setModal(True)
-        self.resize(860, 560)
+        self.resize(980, 560)
 
         # -----------------------------
-        # Status group
+        # Logs (left column)
+        # -----------------------------
+        self._tabs = QTabWidget()
+
+        self._txt_out = QPlainTextEdit()
+        self._txt_out.setReadOnly(True)
+        self._txt_err = QPlainTextEdit()
+        self._txt_err.setReadOnly(True)
+
+        self._tabs.addTab(self._txt_out, "Stdout")
+        self._tabs.addTab(self._txt_err, "Stderr")
+
+        logs_box = QGroupBox("Logs")
+        logs_layout = QVBoxLayout(logs_box)
+        logs_layout.addWidget(self._tabs)
+
+        # -----------------------------
+        # Controls (right column)
+        # -----------------------------
+        controls = QGroupBox("Controls")
+        self._controls_layout = QVBoxLayout(controls)
+        self._controls_layout.setSpacing(8)
+
+        # Use Form.button when available (for icons); fallback to QPushButton.
+        def _mk_btn(label: str, fn: Callable[[], None], icon: str = ""):
+            if Form is not None and hasattr(Form, "button"):
+                return Form.button(label, fn, icon=icon)
+            b = QPushButton(label)
+            b.clicked.connect(fn)
+            return b
+
+        self._btn_install = _mk_btn("Install", self._on_install, icon="download")
+        self._btn_uninstall = _mk_btn("Uninstall", self._on_uninstall, icon="trash")
+        self._btn_start = _mk_btn("Start", self._on_start, icon="play")
+        self._btn_stop = _mk_btn("Stop", self._on_stop, icon="stop")
+
+        self._controls_layout.addWidget(self._btn_install)
+        self._controls_layout.addWidget(self._btn_uninstall)
+        self._controls_layout.addWidget(self._btn_start)
+        self._controls_layout.addWidget(self._btn_stop)
+        self._controls_layout.addStretch(1)
+
+        # -----------------------------
+        # Status (right column, under controls)
         # -----------------------------
         self._lbl_name = QLabel("")
         self._lbl_label = QLabel("")
@@ -1386,70 +1436,33 @@ class ServiceManagerDialog(QDialog):
         status_form.addRow("Installed:", self._lbl_installed)
         status_form.addRow("Running:", self._lbl_running)
         status_form.addRow("PID:", self._lbl_pid)
-
-        # Windows-only bits (kept visible but may be empty)
         status_form.addRow("NSSM:", self._lbl_nssm)
         status_form.addRow("Stdout log:", self._lbl_stdout)
         status_form.addRow("Stderr log:", self._lbl_stderr)
 
         # -----------------------------
-        # Controls
+        # Root layout: 2 columns
         # -----------------------------
-        self._btn_install = QPushButton("Install")
-        self._btn_uninstall = QPushButton("Uninstall")
-        self._btn_start = QPushButton("Start")
-        self._btn_stop = QPushButton("Stop")
-        self._btn_restart = QPushButton("Restart")
-        self._btn_refresh = QPushButton("Refresh")
-        self._btn_close = QPushButton("Close")
+        root = QHBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(10)
 
-        self._btn_install.clicked.connect(self._on_install)
-        self._btn_uninstall.clicked.connect(self._on_uninstall)
-        self._btn_start.clicked.connect(self._on_start)
-        self._btn_stop.clicked.connect(self._on_stop)
-        self._btn_restart.clicked.connect(self._on_restart)
-        self._btn_refresh.clicked.connect(self.refresh)
-        self._btn_close.clicked.connect(self.close)
+        root.addWidget(logs_box, 3)
 
-        controls = QGroupBox("Controls")
-        controls_layout = QHBoxLayout(controls)
-        controls_layout.addWidget(self._btn_install)
-        controls_layout.addWidget(self._btn_uninstall)
-        controls_layout.addStretch(1)
-        controls_layout.addWidget(self._btn_start)
-        controls_layout.addWidget(self._btn_stop)
-        controls_layout.addWidget(self._btn_restart)
-        controls_layout.addStretch(1)
-        controls_layout.addWidget(self._btn_refresh)
-        controls_layout.addWidget(self._btn_close)
+        right = QWidget(self)
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+        right_layout.addWidget(controls)
+        right_layout.addWidget(status_box)
+        right_layout.addStretch(1)
 
-        # -----------------------------
-        # Logs
-        # -----------------------------
-        self._tabs = QTabWidget()
+        root.addWidget(right, 1)
 
-        self._txt_out = QPlainTextEdit()
-        self._txt_out.setReadOnly(True)
-        self._txt_err = QPlainTextEdit()
-        self._txt_err.setReadOnly(True)
-
-        self._tabs.addTab(self._txt_out, "Stdout")
-        self._tabs.addTab(self._txt_err, "Stderr")
-
-        logs_box = QGroupBox("Logs")
-        logs_layout = QVBoxLayout(logs_box)
-        logs_layout.addWidget(self._tabs)
-
-        # Layout root
-        root = QVBoxLayout(self)
-        root.addWidget(status_box)
-        root.addWidget(controls)
-        root.addWidget(logs_box, 1)
-
-        # Poll timer
+        # Poll timer (status + logs)
         self._timer = QTimer(self)
         self._timer.setInterval(self._poll_ms)
-        self._timer.timeout.connect(self._poll_logs)
+        self._timer.timeout.connect(self._on_timer)
 
         # Initial refresh
         self.refresh()
@@ -1521,20 +1534,13 @@ class ServiceManagerDialog(QDialog):
             self._lbl_stdout.setText(out_path if out_path else "(no file log configured)")
             self._lbl_stderr.setText(err_path if err_path else "(no file log configured)")
 
-            # Button states
-            self._btn_install.setEnabled(not installed)
-            self._btn_uninstall.setEnabled(installed)
+            # Button visibility: only show actions that make sense.
+            self._btn_install.setVisible(not installed)
+            self._btn_uninstall.setVisible(installed)
 
-            self._btn_start.setEnabled(installed and not running)
-            self._btn_stop.setEnabled(installed and running)
-            self._btn_restart.setEnabled(installed and running)
-
-            # If not installed, we still allow in-process start/stop, but it can be confusing.
-            # Keep the UI focused on service-manager mode.
-            if not installed:
-                self._btn_start.setEnabled(False)
-                self._btn_stop.setEnabled(False)
-                self._btn_restart.setEnabled(False)
+            # Start/Stop only relevant when installed
+            self._btn_start.setVisible(installed and not running)
+            self._btn_stop.setVisible(installed and running)
 
             # Show a helpful note in logs pane when file logs aren't available.
             if not out_path and not err_path:
@@ -1556,28 +1562,47 @@ class ServiceManagerDialog(QDialog):
     # Actions
     # -----------------------------
 
-    def _run_action(self, fn: Callable[[], None], title: str) -> None:
+    def _on_install(self) -> None:
         try:
-            fn()
+            self._svc.install()
         except Exception as e:
-            QMessageBox.critical(self, "Service", f"{title} failed:\n\n{e}")
+            QMessageBox.critical(self, "Service", f"Install failed:\n\n{e}")
         finally:
             self.refresh()
 
-    def _on_install(self) -> None:
-        self._run_action(self._svc.install, "Install")
-
     def _on_uninstall(self) -> None:
-        self._run_action(self._svc.uninstall, "Uninstall")
+        try:
+            self._svc.uninstall()
+        except Exception as e:
+            QMessageBox.critical(self, "Service", f"Uninstall failed:\n\n{e}")
+        finally:
+            self.refresh()
 
     def _on_start(self) -> None:
-        self._run_action(self._svc._service_manager_start, "Start")
+        try:
+            self._svc._service_manager_start()
+        except Exception as e:
+            QMessageBox.critical(self, "Service", f"Start failed:\n\n{e}")
+        finally:
+            self.refresh()
 
     def _on_stop(self) -> None:
-        self._run_action(self._svc._service_manager_stop, "Stop")
+        try:
+            self._svc._service_manager_stop()
+        except Exception as e:
+            QMessageBox.critical(self, "Service", f"Stop failed:\n\n{e}")
+        finally:
+            self.refresh()
 
-    def _on_restart(self) -> None:
-        self._run_action(self._svc._service_manager_restart, "Restart")
+    # -----------------------------
+    # Log polling
+    # -----------------------------
+
+    def _on_timer(self) -> None:
+        # Keep status and button visibility in sync.
+        self.refresh()
+        # Then append any new log text.
+        self._poll_logs()
 
     # -----------------------------
     # Log polling
