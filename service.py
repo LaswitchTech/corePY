@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QMessageBox,
+    QWidget,
 )
 
 # Optional UI helpers (icons/buttons)
