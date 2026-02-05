@@ -1404,14 +1404,14 @@ class ServiceManagerDialog(QDialog):
         self._tabs.addTab(self._txt_out, "Stdout")
         self._tabs.addTab(self._txt_err, "Stderr")
 
-        logs_box = QGroupBox("Logs")
+        logs_box = QGroupBox()
         logs_layout = QVBoxLayout(logs_box)
         logs_layout.addWidget(self._tabs)
 
         # -----------------------------
         # Controls (right column)
         # -----------------------------
-        controls = QGroupBox("Controls")
+        controls = QGroupBox()
         self._controls_layout = QHBoxLayout(controls)
         self._controls_layout.setSpacing(10)
         self._controls_layout.setContentsMargins(10, 10, 10, 10)
@@ -1450,7 +1450,7 @@ class ServiceManagerDialog(QDialog):
         self._lbl_stdout = QLabel("")
         self._lbl_stderr = QLabel("")
 
-        status_box = QGroupBox("Status")
+        status_box = QGroupBox()
         status_form = QFormLayout(status_box)
         status_form.addRow("Application:", self._lbl_name)
         status_form.addRow("Service label:", self._lbl_label)
