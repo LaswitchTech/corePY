@@ -1380,13 +1380,6 @@ class ServiceManagerDialog(QDialog):
         self.setWindowTitle("Service Manager")
         self.setModal(True)
         self.resize(980, 560)
-        # Ensure GroupBox titles and log views respect the dark theme on Windows.
-        # (Windows styles sometimes keep GroupBox titles black unless explicitly styled.)
-        self.setStyleSheet(
-            (self.styleSheet() or "")
-            + "\n" +
-            "QTabWidget::pane { background-color: #414141; border: 1px solid #76797C; border-radius: 5px; }\n"
-        )
 
         # -----------------------------
         # Logs (right column, under controls)
