@@ -36,6 +36,27 @@ sed_inplace() {
   fi
 }
 
+# -----------------------------------------------------------------------------
+# corePY vendored bin sync
+# Some projects vendor corePY under src/core/src and keep binaries there.
+# To make PyInstaller data inclusion consistent, mirror vendored binaries into
+# src/bin (overwriting existing content).
+# -----------------------------------------------------------------------------
+
+sync_vendored_bins() {
+  local src_dir="src/core/src/bin"
+  local dst_dir="src/bin"
+
+  [ -d "$src_dir" ] || return 0
+
+  log "Syncing vendored binaries: $src_dir -> $dst_dir"
+  mkdir -p "$dst_dir"
+
+  # Use cp -R to stay portable across macOS/Linux/Windows Git Bash.
+  # Trailing '/.' copies contents (including hidden files) into destination.
+  cp -R "$src_dir/." "$dst_dir/" 2>/dev/null || cp -R "$src_dir"/* "$dst_dir/" 2>/dev/null || true
+}
+
 #
 # Icon generation
 # - macOS: icon.svg -> icon.icns (every build)
@@ -675,6 +696,7 @@ fi
 # -----------------------------------------------------------------------------
 # Regenerate platform icons from icon.svg on every build (if present)
 # -----------------------------------------------------------------------------
+sync_vendored_bins
 generate_icns_from_svg_macos
 generate_ico_from_svg_windows
 
