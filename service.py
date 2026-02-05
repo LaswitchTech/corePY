@@ -1058,6 +1058,63 @@ class Service:
         base = Path(os.environ.get("PROGRAMDATA", r"C:\\ProgramData"))
         return base / (self._app_name() or "corepy") / "bin"
 
+    def _windows_bin_dir(self) -> Path:
+        """Best-effort directory where vendored tools live on Windows.
+
+        Priority:
+          1) Stable install dir under ProgramData (created by this module)
+          2) If frozen, beside the executable (typical for unpacked builds)
+          3) Source-tree locations (dev)
+
+        Returns a directory that *may* not exist; callers should validate.
+        """
+        # 1) Preferred stable location
+        try:
+            d = self._windows_install_dir()
+            if d:
+                return d
+        except Exception:
+            pass
+
+        # 2) Frozen bundle: beside the executable
+        if getattr(sys, "frozen", False):
+            try:
+                return Path(sys.executable).resolve().parent
+            except Exception:
+                pass
+
+        # 3) Fallback: current working directory
+        return Path.cwd()
+
+    def _windows_copy_tool_to_install_dir(self, tool_path: Path) -> Path:
+        """Copy a bundled tool (like nssm.exe) into the stable install dir.
+
+        This avoids services pointing into PyInstaller's temporary _MEI folder.
+        """
+        install_dir = self._windows_install_dir()
+        install_dir.mkdir(parents=True, exist_ok=True)
+
+        dest = install_dir / tool_path.name
+        try:
+            # Only copy if missing or different size/mtime; keep it simple.
+            if not dest.exists():
+                shutil.copy2(str(tool_path), str(dest))
+            else:
+                try:
+                    if tool_path.stat().st_size != dest.stat().st_size:
+                        shutil.copy2(str(tool_path), str(dest))
+                except Exception:
+                    # If we can't stat, just overwrite.
+                    shutil.copy2(str(tool_path), str(dest))
+        except Exception:
+            # Last resort: attempt overwrite
+            try:
+                shutil.copy2(str(tool_path), str(dest))
+            except Exception:
+                pass
+
+        return dest
+
     def _windows_nssm_candidates(self) -> list[Path]:
         """Return candidate NSSM locations (supports both corePY and vendored corePY inside apps)."""
         # Running inside corePY source tree
@@ -1065,13 +1122,20 @@ class Service:
         core_dir = here.parent  # .../src/core
 
         rels = [
+            # Common repo layouts
             Path("src") / "bin" / "nssm" / "windows" / "x86" / "nssm.exe",
             Path("src") / "bin" / "nssm" / "windows" / "x86_64" / "nssm.exe",
             Path("bin") / "nssm" / "windows" / "x86" / "nssm.exe",
             Path("bin") / "nssm" / "windows" / "x86_64" / "nssm.exe",
+
             # Vendored corePY inside another repo (e.g. Replicator: src/core/src/bin/...)
             Path("src") / "core" / "src" / "bin" / "nssm" / "windows" / "x86" / "nssm.exe",
             Path("src") / "core" / "src" / "bin" / "nssm" / "windows" / "x86_64" / "nssm.exe",
+
+            # Flat copies in a bin dir (after we copy tools into ProgramData)
+            Path("nssm.exe"),
+            Path("bin") / "nssm.exe",
+            Path("tools") / "nssm.exe",
         ]
 
         roots = [
@@ -1081,9 +1145,18 @@ class Service:
             here.parent.parent,             # .../src (safe-ish)
         ]
 
+        # Preferred stable install dir (ProgramData) for services
+        try:
+            roots.insert(0, self._windows_install_dir())
+        except Exception:
+            pass
+
         # If frozen, also look beside the executable
         if getattr(sys, "frozen", False):
-            roots.append(Path(sys.executable).resolve().parent)
+            try:
+                roots.append(Path(sys.executable).resolve().parent)
+            except Exception:
+                pass
 
         out: list[Path] = []
         for root in roots:
@@ -1111,15 +1184,58 @@ class Service:
         preferred += ["x86"] if want_64 else ["x86_64"]
 
         candidates = self._windows_nssm_candidates()
+        candidate: Optional[Path] = None
+        # Prefer matching arch
         for arch in preferred:
             for p in candidates:
                 if f"\\{arch}\\" in str(p).lower() and p.exists():
-                    return p
-
+                    candidate = p
+                    break
+            if candidate is not None:
+                break
         # Any existing
-        for p in candidates:
-            if p.exists():
-                return p
+        if candidate is None:
+            for p in candidates:
+                if p.exists():
+                    candidate = p
+                    break
+        if candidate is not None:
+            # If it's in a temp unpack dir, copy to stable dir.
+            try:
+                s = str(candidate)
+                if "_mei" in s.lower() or "\\appdata\\local\\temp\\" in s.lower():
+                    stable = self._windows_copy_tool_to_install_dir(candidate)
+                    if stable.exists():
+                        return stable
+            except Exception:
+                pass
+            return candidate
+
+        # If we found NSSM inside a PyInstaller temp folder (_MEI...), copy it to stable ProgramData
+        # and return the stable path so services never reference a temporary location.
+        try:
+            found = None
+            for arch in preferred:
+                for p in candidates:
+                    if f"\\{arch}\\" in str(p).lower() and p.exists():
+                        found = p
+                        break
+                if found:
+                    break
+            if found is None:
+                for p in candidates:
+                    if p.exists():
+                        found = p
+                        break
+
+            if found is not None:
+                s = str(found)
+                if "_mei" in s.lower() or "\\appdata\\local\\temp\\" in s.lower():
+                    stable = self._windows_copy_tool_to_install_dir(found)
+                    if stable.exists():
+                        return stable
+        except Exception:
+            pass
 
         return None
 
@@ -1132,6 +1248,14 @@ class Service:
         Uses the bundled NSSM, and captures output for better error messages.
         """
         nssm = self._windows_find_nssm()
+        # Prefer a stable copy under ProgramData if available
+        try:
+            stable = self._windows_install_dir() / "nssm.exe"
+            if stable.exists():
+                nssm = stable
+        except Exception:
+            pass
+
         if not nssm:
             raise RuntimeError("NSSM not found (COREPY_NSSM override not set and no bundled binary found).")
 
