@@ -15,7 +15,20 @@ import json
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import (
+    QApplication,
+    QDialog,
+    QTabWidget,
+    QGroupBox,
+    QVBoxLayout,
+    QHBoxLayout,
+    QFormLayout,
+    QLabel,
+    QPushButton,
+    QPlainTextEdit,
+    QMessageBox,
+)
 
 
 @dataclass
@@ -340,6 +353,23 @@ class Service:
         msg = "\n".join(lines)
         print(msg)
         self._log(msg, level="info")
+
+
+    # ------------------------------------------------------------------
+    # UI helper
+    # ------------------------------------------------------------------
+
+    def open_manager_dialog(self, parent=None) -> None:
+        """Open a small GUI dialog to manage the service (install/start/stop + logs).
+
+        This is intentionally optional: apps can call it when running with a GUI.
+        """
+        try:
+            dlg = ServiceManagerDialog(self, parent=parent)
+            dlg.exec_()
+        except Exception as e:
+            # If called from a non-GUI context, fail gracefully.
+            self._log(f"Failed to open service manager dialog: {e}", level="error")
 
     def request_stop(self) -> None:
         """Request the current service loop to stop (used by signal handlers)."""
@@ -1242,6 +1272,7 @@ class Service:
     def _windows_has_nssm(self) -> bool:
         return bool(self._windows_find_nssm())
 
+
     def _windows_nssm_run(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
         """Run NSSM with the given args.
 
@@ -1264,3 +1295,319 @@ class Service:
         if check and r.returncode != 0:
             raise RuntimeError(f"nssm failed: {cmd}\n{(r.stdout or '') + (r.stderr or '')}")
         return r
+
+
+# ------------------------------------------------------------------
+# Service Manager Dialog UI (PyQt5)
+# ------------------------------------------------------------------
+
+class _TailReader:
+    """Tiny file tailer used by the ServiceManagerDialog.
+
+    Keeps an in-memory cursor per file and reads new bytes on each poll.
+    """
+
+    def __init__(self) -> None:
+        self._pos: dict[str, int] = {}
+
+    def read_new_text(self, path: str, *, max_bytes: int = 256 * 1024) -> str:
+        if not path:
+            return ""
+        try:
+            if not os.path.exists(path):
+                return ""
+
+            last = self._pos.get(path, 0)
+            size = os.path.getsize(path)
+
+            # If file was truncated/rotated, restart.
+            if size < last:
+                last = 0
+
+            # Avoid reading gigantic chunks at once.
+            start = max(0, size - max_bytes) if last == 0 and size > max_bytes else last
+
+            with open(path, "rb") as f:
+                f.seek(start)
+                data = f.read()
+
+            self._pos[path] = start + len(data)
+
+            # Best-effort decode
+            try:
+                return data.decode("utf-8", errors="replace")
+            except Exception:
+                return data.decode(errors="replace")
+        except Exception:
+            return ""
+
+
+class ServiceManagerDialog(QDialog):
+    """Cross-platform service manager UI.
+
+    Focus:
+      - Install / Uninstall
+      - Start / Stop / Restart
+      - Status (installed/running)
+      - Live-ish log view (stdout/stderr files when available)
+
+    Note: On Linux, services often log to journald; this dialog will show file logs
+    when present, otherwise it shows a hint.
+    """
+
+    def __init__(self, service: Service, parent=None) -> None:
+        super().__init__(parent)
+        self._svc = service
+        self._tail = _TailReader()
+        self._poll_ms = 1000
+
+        self.setWindowTitle(f"{self._svc._app_name()} – Service")
+        self.setModal(True)
+        self.resize(860, 560)
+
+        # -----------------------------
+        # Status group
+        # -----------------------------
+        self._lbl_name = QLabel("")
+        self._lbl_label = QLabel("")
+        self._lbl_installed = QLabel("")
+        self._lbl_running = QLabel("")
+        self._lbl_pid = QLabel("")
+        self._lbl_mgr = QLabel("")
+        self._lbl_nssm = QLabel("")
+        self._lbl_stdout = QLabel("")
+        self._lbl_stderr = QLabel("")
+
+        status_box = QGroupBox("Status")
+        status_form = QFormLayout(status_box)
+        status_form.addRow("Application:", self._lbl_name)
+        status_form.addRow("Service label:", self._lbl_label)
+        status_form.addRow("Manager:", self._lbl_mgr)
+        status_form.addRow("Installed:", self._lbl_installed)
+        status_form.addRow("Running:", self._lbl_running)
+        status_form.addRow("PID:", self._lbl_pid)
+
+        # Windows-only bits (kept visible but may be empty)
+        status_form.addRow("NSSM:", self._lbl_nssm)
+        status_form.addRow("Stdout log:", self._lbl_stdout)
+        status_form.addRow("Stderr log:", self._lbl_stderr)
+
+        # -----------------------------
+        # Controls
+        # -----------------------------
+        self._btn_install = QPushButton("Install")
+        self._btn_uninstall = QPushButton("Uninstall")
+        self._btn_start = QPushButton("Start")
+        self._btn_stop = QPushButton("Stop")
+        self._btn_restart = QPushButton("Restart")
+        self._btn_refresh = QPushButton("Refresh")
+        self._btn_close = QPushButton("Close")
+
+        self._btn_install.clicked.connect(self._on_install)
+        self._btn_uninstall.clicked.connect(self._on_uninstall)
+        self._btn_start.clicked.connect(self._on_start)
+        self._btn_stop.clicked.connect(self._on_stop)
+        self._btn_restart.clicked.connect(self._on_restart)
+        self._btn_refresh.clicked.connect(self.refresh)
+        self._btn_close.clicked.connect(self.close)
+
+        controls = QGroupBox("Controls")
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.addWidget(self._btn_install)
+        controls_layout.addWidget(self._btn_uninstall)
+        controls_layout.addStretch(1)
+        controls_layout.addWidget(self._btn_start)
+        controls_layout.addWidget(self._btn_stop)
+        controls_layout.addWidget(self._btn_restart)
+        controls_layout.addStretch(1)
+        controls_layout.addWidget(self._btn_refresh)
+        controls_layout.addWidget(self._btn_close)
+
+        # -----------------------------
+        # Logs
+        # -----------------------------
+        self._tabs = QTabWidget()
+
+        self._txt_out = QPlainTextEdit()
+        self._txt_out.setReadOnly(True)
+        self._txt_err = QPlainTextEdit()
+        self._txt_err.setReadOnly(True)
+
+        self._tabs.addTab(self._txt_out, "Stdout")
+        self._tabs.addTab(self._txt_err, "Stderr")
+
+        logs_box = QGroupBox("Logs")
+        logs_layout = QVBoxLayout(logs_box)
+        logs_layout.addWidget(self._tabs)
+
+        # Layout root
+        root = QVBoxLayout(self)
+        root.addWidget(status_box)
+        root.addWidget(controls)
+        root.addWidget(logs_box, 1)
+
+        # Poll timer
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._poll_ms)
+        self._timer.timeout.connect(self._poll_logs)
+
+        # Initial refresh
+        self.refresh()
+        self._timer.start()
+
+    # -----------------------------
+    # Helpers
+    # -----------------------------
+
+    def _manager_name(self) -> str:
+        if sys.platform.startswith("win"):
+            return "Windows Service Control Manager (NSSM)" if self._svc._windows_has_nssm() else "Windows Service Control Manager"
+        if sys.platform == "darwin":
+            return "launchd"
+        return "systemd" if shutil.which("systemctl") else "(unknown)"
+
+    def _windows_log_paths(self) -> tuple[str, str]:
+        label = self._svc._service_label()
+        try:
+            logs_dir = self._svc._windows_install_dir().parent / "log"
+            return str(logs_dir / f"{label}.out.log"), str(logs_dir / f"{label}.err.log")
+        except Exception:
+            return "", ""
+
+    def _macos_log_paths(self) -> tuple[str, str]:
+        try:
+            logs_dir = Path.home() / "Library" / "Logs" / self._svc._app_name()
+            return str(logs_dir / "service.out.log"), str(logs_dir / "service.err.log")
+        except Exception:
+            return "", ""
+
+    def _log_paths(self) -> tuple[str, str]:
+        if sys.platform.startswith("win"):
+            return self._windows_log_paths()
+        if sys.platform == "darwin":
+            return self._macos_log_paths()
+        # Linux: systemd typically logs to journal; still try common file paths
+        return "", ""
+
+    def _set_bool_label(self, lbl: QLabel, value: bool) -> None:
+        lbl.setText("yes" if value else "no")
+
+    def refresh(self) -> None:
+        try:
+            name = self._svc._app_name()
+            label = self._svc._service_label()
+            installed = self._svc._is_installed()
+            running = self._svc._is_service_active() if installed else self._svc._is_running()
+            pid = self._svc._read_pidfile() if not installed else None
+
+            self._lbl_name.setText(name)
+            self._lbl_label.setText(label)
+            self._lbl_mgr.setText(self._manager_name())
+            self._set_bool_label(self._lbl_installed, installed)
+            self._set_bool_label(self._lbl_running, running)
+            self._lbl_pid.setText(str(pid) if pid else "-")
+
+            # NSSM path (Windows only)
+            if sys.platform.startswith("win"):
+                try:
+                    p = self._svc._windows_find_nssm()
+                    self._lbl_nssm.setText(str(p) if p else "(not found)")
+                except Exception:
+                    self._lbl_nssm.setText("(unknown)")
+            else:
+                self._lbl_nssm.setText("-")
+
+            out_path, err_path = self._log_paths()
+            self._lbl_stdout.setText(out_path if out_path else "(no file log configured)")
+            self._lbl_stderr.setText(err_path if err_path else "(no file log configured)")
+
+            # Button states
+            self._btn_install.setEnabled(not installed)
+            self._btn_uninstall.setEnabled(installed)
+
+            self._btn_start.setEnabled(installed and not running)
+            self._btn_stop.setEnabled(installed and running)
+            self._btn_restart.setEnabled(installed and running)
+
+            # If not installed, we still allow in-process start/stop, but it can be confusing.
+            # Keep the UI focused on service-manager mode.
+            if not installed:
+                self._btn_start.setEnabled(False)
+                self._btn_stop.setEnabled(False)
+                self._btn_restart.setEnabled(False)
+
+            # Show a helpful note in logs pane when file logs aren't available.
+            if not out_path and not err_path:
+                note = (
+                    "Logs are not available as files on this platform/configuration.\n"
+                    "- Windows: logs are written to ProgramData via NSSM settings.\n"
+                    "- macOS: logs are written to ~/Library/Logs/<AppName>/.\n"
+                    "- Linux: consider using journald (journalctl -u <service>).\n"
+                )
+                if not self._txt_out.toPlainText():
+                    self._txt_out.setPlainText(note)
+                if not self._txt_err.toPlainText():
+                    self._txt_err.setPlainText(note)
+
+        except Exception as e:
+            QMessageBox.warning(self, "Service", f"Failed to refresh status: {e}")
+
+    # -----------------------------
+    # Actions
+    # -----------------------------
+
+    def _run_action(self, fn: Callable[[], None], title: str) -> None:
+        try:
+            fn()
+        except Exception as e:
+            QMessageBox.critical(self, "Service", f"{title} failed:\n\n{e}")
+        finally:
+            self.refresh()
+
+    def _on_install(self) -> None:
+        self._run_action(self._svc.install, "Install")
+
+    def _on_uninstall(self) -> None:
+        self._run_action(self._svc.uninstall, "Uninstall")
+
+    def _on_start(self) -> None:
+        self._run_action(self._svc._service_manager_start, "Start")
+
+    def _on_stop(self) -> None:
+        self._run_action(self._svc._service_manager_stop, "Stop")
+
+    def _on_restart(self) -> None:
+        self._run_action(self._svc._service_manager_restart, "Restart")
+
+    # -----------------------------
+    # Log polling
+    # -----------------------------
+
+    def _append_text(self, widget: QPlainTextEdit, text: str) -> None:
+        if not text:
+            return
+        try:
+            widget.moveCursor(widget.textCursor().End)
+            widget.insertPlainText(text)
+            widget.moveCursor(widget.textCursor().End)
+        except Exception:
+            # Safe fallback
+            try:
+                widget.setPlainText(widget.toPlainText() + text)
+            except Exception:
+                pass
+
+    def _poll_logs(self) -> None:
+        out_path, err_path = self._log_paths()
+        if out_path:
+            self._append_text(self._txt_out, self._tail.read_new_text(out_path))
+        if err_path:
+            self._append_text(self._txt_err, self._tail.read_new_text(err_path))
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        try:
+            if self._timer.isActive():
+                self._timer.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
