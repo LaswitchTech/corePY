@@ -97,6 +97,47 @@ class Service:
                 self._configuration.configChanged.connect(lambda _cfg: self._refresh_action_visibility())
             except Exception:
                 pass
+
+    def _win_hidden_subprocess_kwargs(self) -> dict:
+        """Return subprocess kwargs that hide console windows on Windows.
+
+        This prevents the "cmd/sc/powershell" windows from flashing when running
+        service install/uninstall/start/stop operations.
+        """
+        if platform.system() != "Windows":
+            return {}
+
+        # `CREATE_NO_WINDOW` exists on Windows; define defensively for older Pythons.
+        create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+        # STARTUPINFO/STARTF_USESHOWWINDOW hides the window for console apps.
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+
+        return {
+            "startupinfo": si,
+            "creationflags": create_no_window,
+        }
+
+    def _run_hidden(self, args: list[str], **kwargs):
+        """subprocess.run wrapper that hides Windows console windows."""
+        win_kwargs = self._win_hidden_subprocess_kwargs()
+        # Do not override caller-provided values.
+        for k, v in win_kwargs.items():
+            kwargs.setdefault(k, v)
+        # Default to no shell to avoid spawning an extra console.
+        kwargs.setdefault("shell", False)
+        return subprocess.run(args, **kwargs)
+
+    def _popen_hidden(self, args: list[str], **kwargs):
+        """subprocess.Popen wrapper that hides Windows console windows."""
+        win_kwargs = self._win_hidden_subprocess_kwargs()
+        for k, v in win_kwargs.items():
+            kwargs.setdefault(k, v)
+        kwargs.setdefault("shell", False)
+        return subprocess.Popen(args, **kwargs)
+
     def _service_domain(self) -> str:
         """Return reverse-DNS domain used for service labels.
 
@@ -656,10 +697,7 @@ class Service:
 
     def _run_subprocess(self, args: list[str], **kwargs) -> subprocess.CompletedProcess:
         if sys.platform.startswith("win"):
-            try:
-                kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
-            except Exception:
-                pass
+            return self._run_hidden(args, **kwargs)
         return subprocess.run(args, **kwargs)
 
     def _service_label(self) -> str:
@@ -804,7 +842,7 @@ class Service:
                 if self._windows_has_nssm():
                     self._windows_nssm_run(["start", label])
                 else:
-                    self._run_subprocess(["sc", "start", label], check=False)
+                    self._run_hidden(["sc", "start", label], check=False)
                 self._log(f"Requested start for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -844,7 +882,7 @@ class Service:
                 if self._windows_has_nssm():
                     self._windows_nssm_run(["stop", label])
                 else:
-                    self._run_subprocess(["sc", "stop", label], check=False)
+                    self._run_hidden(["sc", "stop", label], check=False)
                 self._log(f"Requested stop for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -864,9 +902,9 @@ class Service:
                 if self._windows_has_nssm():
                     self._windows_nssm_run(["restart", label])
                 else:
-                    self._run_subprocess(["sc", "stop", label], check=False)
+                    self._run_hidden(["sc", "stop", label], check=False)
                     time.sleep(0.5)
-                    self._run_subprocess(["sc", "start", label], check=False)
+                    self._run_hidden(["sc", "start", label], check=False)
                 self._log(f"Requested restart for Windows service: {label}")
                 return
             if sys.platform == "darwin":
@@ -974,8 +1012,8 @@ class Service:
             return
 
         # Fallback to sc
-        subprocess.run(["sc", "stop", name], check=False)
-        r = subprocess.run(["sc", "delete", name], capture_output=True, text=True)
+        self._run_hidden(["sc", "stop", name], check=False)
+        r = self._run_hidden(["sc", "delete", name], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"sc delete failed: {(r.stdout or '') + (r.stderr or '')}")
         self._log(f"Uninstalled Windows service: {name}")
