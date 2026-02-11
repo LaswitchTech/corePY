@@ -350,15 +350,16 @@ class FileSystem:
 
             # /MIR implies /E + delete extras; /E copies subdirs including empty
             # /COPY:DATSOU preserves Data, Attributes, Timestamps, Security (ACL), Owner, Auditing
-            # /DCOPY:DAT preserves directory timestamps
+            # /DCOPY:DATSOU preserves directory timestamps
             # /R /W keep retries low for UI responsiveness
             args = [
                 robocopy,
                 src,
                 dst,
                 "/MIR" if allow_deletion else "/E",
-                "/COPY:DATSOU",
-                "/DCOPY:DAT",
+                "/COPYALL",
+                "/DCOPY:DATSOU",
+                "/SECFIX",
                 "/R:1",
                 "/W:1",
             ]
