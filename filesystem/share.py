@@ -73,6 +73,33 @@ class ShareTarget:
         except Exception:
             return self.path or ""
 
+class ShareLoggerAdapter:
+    """Adapter to feed Share's logging into Replicator/corePY style append()."""
+
+    def __init__(self, append_fn: Callable[..., None]):
+        self._append = append_fn
+
+    def _call(self, msg: str, level: str) -> None:
+        msg = redact_secrets(msg)
+        try:
+            self._append(msg, level=level)  # core Log.append style
+        except TypeError:
+            try:
+                self._append(msg, level)      # positional callable style
+            except TypeError:
+                self._append(msg)             # best-effort fallback
+
+    def debug(self, msg: str) -> None:
+        self._call(msg, "debug")
+
+    def info(self, msg: str) -> None:
+        self._call(msg, "info")
+
+    def warning(self, msg: str) -> None:
+        self._call(msg, "warning")
+
+    def error(self, msg: str) -> None:
+        self._call(msg, "error")
 
 class Share:
     """Mount and unmount SMB shares."""
