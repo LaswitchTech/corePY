@@ -99,7 +99,7 @@ class Configuration(QObject):
         # Built-in provisioning settings
         self.add("provisioning.host", "", "text", label="Host/URL")
         self.add("provisioning.token", "", "password", label="Token")
-        self.add("provisioning.appid", "PyRDPConnect", "text", label="App ID")
+        self.add("provisioning.appid", self._app.applicationName() if self._app else "corePY App", "text", label="App ID")
 
     # ------------------------------------------------------------------
     # Core API
@@ -292,8 +292,9 @@ class Configuration(QObject):
     # ------------------------------------------------------------------
 
     def cli(self, cli: QApplication = None) -> None:
-        cli.add("import", "Import configuration from the given file.", self.import_from_path, args=1, arg_names=["<path>"])
-        cli.add("provision", "Contact the provisioning server and import the returned configuration.", self.provision)
+        # cli.add("config.import", "Import configuration from the given file.", self.import_from_path, args=1, arg_names=["<path>"])
+        # cli.add("config.provision", "Contact the provisioning server and import the returned configuration.", self.provision)
+        pass
 
     # ------------------------------------------------------------------
     # UI dialog builder
@@ -749,40 +750,16 @@ class Configuration(QObject):
             self.set(key, value)
 
     def _get_config_dir(self) -> str:
-        # Legacy default (macOS, Windows, etc.)
-        default_dir = os.path.join(self.root_dir, "config")
+        """Return the directory used to store configuration files.
 
-        # Try to get OS name from helper to stay consistent with Application
+        Prefer Helper.get_config_path() (new, OS-appropriate location).
+        Fall back to the legacy project-root `config/` directory if the
+        helper doesn't provide get_config_path().
+        """
+        # Preferred: OS-appropriate config directory via Helper
         try:
-            os_name = self._helper.get_os()
+            # Let Helper resolve the app name (or use the QApplication name)
+            return self._helper.get_config_path(ensure=True, scope="system")
         except Exception:
-            os_name = None
-
-        # Only change behavior on Linux and when we have an application name
-        if os_name == "linux":
-            app_name = ""
-
-            # If we have an Application instance, try to use its name
-            if self._app is not None:
-                try:
-                    # Prefer the Application.name property if available
-                    if hasattr(self._app, "name"):
-                        app_name = self._app.name  # type: ignore[attr-defined]
-                    else:
-                        app_name = self._app.applicationName()
-                except Exception:
-                    app_name = ""
-
-            # In CLI usage there may be no Application; fall back to the root_dir name
-            if not app_name:
-                try:
-                    app_name = os.path.basename(self.root_dir) or ""
-                except Exception:
-                    app_name = ""
-
-            if app_name:
-                home = os.path.expanduser("~")
-                if home:
-                    return os.path.join(home, ".config", app_name)
-
-        return default_dir
+            # Legacy fallback (kept for backward compatibility)
+            return os.path.join(self.root_dir, "config")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# src/core/command-line.py
+# src/core/cli.py
 import sys
 from typing import Any, Optional
 
@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QApplication
 from .helper import Helper
 from .configuration import Configuration
 from .log import Log
+from .service import Service
 
 # ---------------------------------------------------------------------------
 # CommandLine class
@@ -42,11 +43,16 @@ class CommandLine(QApplication):
         # Logger
         self._logger = Log()
 
+        # Service manager
+        self._service = Service(self._logger, self._configuration)
+
         # Initialize core commands
         if hasattr(self._configuration, "cli") and callable(getattr(self._configuration, "cli")):
             self._configuration.cli(self)
         if hasattr(self._logger, "cli") and callable(getattr(self._logger, "cli")):
             self._logger.cli(self)
+        if hasattr(self._service, "cli") and callable(getattr(self._service, "cli")):
+            self._service.cli(self)
 
     # ------------------------------------------------------------------
     # Properties / accessors
@@ -63,6 +69,10 @@ class CommandLine(QApplication):
     @property
     def configuration(self) -> Configuration:
         return self._configuration
+
+    @property
+    def service(self) -> Service:
+        return self._service
 
     @property
     def name(self) -> str:
@@ -83,10 +93,21 @@ class CommandLine(QApplication):
         print("Available commands:")
         print()
 
-        entries: list[tuple[str, str]] = []
+        # Group entries by category while preserving insertion order.
+        # Category order is the order we first see a category during add().
+        categories_order: list[str] = []
+        grouped: dict[str, list[tuple[str, str]]] = {}
 
         # Build usage strings including required arguments
-        for cmd, info in sorted(self._commands.items()):
+        # Preserve insertion order (the order commands were added)
+        for cmd, info in self._commands.items():
+            category = info.get("category") or "General"
+            # Capitalize category
+            category = category.capitalize()
+            if category not in grouped:
+                grouped[category] = []
+                categories_order.append(category)
+
             desc = info.get("description", "") or ""
             args_required = info.get("args_required", 0) or 0
             arg_names = info.get("arg_names") or []
@@ -102,20 +123,41 @@ class CommandLine(QApplication):
             if args_required > 0:
                 usage += " " + " ".join(arg_names[:args_required])
 
-            entries.append((usage, desc))
+            grouped[category].append((usage, desc))
 
-        # Compute padding for alignment
-        if entries:
-            max_cmd_len = max(len(usage) for usage, _ in entries)
+        # Compute padding for alignment across all commands
+        all_entries: list[tuple[str, str]] = []
+        for cat in categories_order:
+            all_entries.extend(grouped.get(cat, []))
+
+        if all_entries:
+            max_cmd_len = max(len(usage) for usage, _ in all_entries)
         else:
             max_cmd_len = 0
 
-        for usage, desc in entries:
-            print(f"  {usage:<{max_cmd_len}}  {desc}")
+        # Print grouped commands with a simple separator/header per category
+        for idx, cat in enumerate(categories_order):
+            if idx != 0:
+                print()
+            print(f"[{cat}]")
+            for usage, desc in grouped.get(cat, []):
+                print(f"  {usage:<{max_cmd_len}}  {desc}")
 
         print()
 
     def add(self, command: str, description: str = "", callable: Optional[callable] = None, args: int = 0, arg_names: Optional[list[str]] = None) -> None:
+        # Support category prefixes using dot notation (e.g. "service.status").
+        # The CLI token remains the final segment ("--status"), while the prefix
+        # is used only for grouping in help output.
+        category: Optional[str] = None
+
+        raw = command.lstrip("-")
+        if "." in raw:
+            parts = [p for p in raw.split(".") if p]
+            if len(parts) >= 2:
+                category = ".".join(parts[:-1])
+                command = parts[-1]
+
         if not command.startswith("--"):
             command = f"--{command}"
         # Normalize argument names
@@ -127,6 +169,7 @@ class CommandLine(QApplication):
             "callable": callable,
             "args_required": args,
             "arg_names": arg_names,
+            "category": category,
         }
 
     def run(self, command: str, *args: Any, **kwargs: Any) -> Any:

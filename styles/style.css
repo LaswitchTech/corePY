@@ -1,8 +1,20 @@
-QDialog, QMessageBox, QProgressDialog, QTabWidget, QTabWidget::pane {
-    background-color: #393939;
+QDialog, QMessageBox, QProgressDialog, QTabWidget, QTabWidget::pane, QGroupBox, QGroupBox::title {
+    background-color: #212121;
     color: #FFFFFF;
     font-family: Arial, sans-serif;
     font-size: 14px;
+}
+
+QGroupBox {
+    border: 1px solid #76797C;
+    border-radius: 5px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 6px;
 }
 
 QTabWidget::pane {
@@ -11,9 +23,10 @@ QTabWidget::pane {
     border-radius: 5px;
     position: absolute;
     top: -1px;
+    padding: 10px;
 }
 
-QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab {
+QLabel, QLineEdit, QTimeEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabBar::tab, QPlainTextEdit {
     font-size: 14px;
     border: 1px solid #76797C;
     border-radius: 5px;
@@ -21,13 +34,17 @@ QLabel, QLineEdit, QCheckBox, QTextEdit, QComboBox, QSpinBox, QPushButton, QTabB
     margin: 5px 0px;
 }
 
-QLineEdit, QTextEdit, QComboBox, QSpinBox {
+QLineEdit, QTimeEdit, QTextEdit, QComboBox, QSpinBox, QPlainTextEdit {
     background-color: #212121;
     color: #FFFFFF;
     width: 300px;
 }
 
-QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus {
+QTimeEdit {
+    width: 75px;
+}
+
+QLineEdit:focus, QTimeEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {
     border: 1px solid #0d6efd;
 }
 
@@ -117,6 +134,55 @@ QAbstractItemView::item:hover {
     background-color: #5f6263;
     border: none;
 }
+
+/* Added styling for QTableView and QTableWidget to match dark theme */
+QTableView, QTableWidget {
+    border: 1px solid #76797C;
+    border-radius: 5px;
+    background-color: #212121;
+    color: #FFFFFF;
+    gridline-color: #414344;
+    selection-background-color: #0d6efd;
+    selection-color: #FFFFFF;
+    outline: 0;
+    padding: 0px;
+    margin: 5px 0px;
+}
+
+QHeaderView::section {
+    background-color: #414344;
+    color: #FFFFFF;
+    border: 1px solid #414344;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+    padding: 8px 10px;
+}
+
+QTableCornerButton::section {
+    background-color: #414344;
+    color: #FFFFFF;
+    border: 1px solid #414344;
+    padding: 8px 10px;
+}
+
+QTableView::item, QTableWidget::item {
+    padding: 6px 10px;
+    border: none;
+}
+
+QTableView::item:hover, QTableWidget::item:hover {
+    background-color: #5f6263;
+}
+
+QTableView::item:selected, QTableWidget::item:selected {
+    background-color: #0d6efd;
+    color: #FFFFFF;
+}
+
+QTableView:focus, QTableWidget:focus {
+    outline: 0;
+}
+
 QComboBox QFrame,
 QFrame#qt_qcombobox_popup {
     background-color: #212121;
@@ -229,7 +295,7 @@ QPushButton:pressed, QTabBar::tab:pressed, QTabBar::tab:selected {
 
 #MsgBox {
     min-width: 400px;
-    background-color: #393939;
+    background-color: #212121;
     color: #FFFFFF;
     padding: 10px;
     font-size: 14px;
@@ -237,7 +303,7 @@ QPushButton:pressed, QTabBar::tab:pressed, QTabBar::tab:selected {
 
 #Client {
     min-width: 400px;
-    background-color: #393939;
+    background-color: #212121;
     color: #FFFFFF;
     padding: 10px;
     font-size: 14px;

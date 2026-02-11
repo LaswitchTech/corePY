@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import QProxyStyle, QStyle, QApplication, QProgressDialog, 
 from .helper import Helper
 from .configuration import Configuration
 from .log import Log
+from .service import Service
 from .ui import MsgBox
 import os
 import subprocess
@@ -195,6 +196,9 @@ class Application(QApplication):
         # Logger
         self._logger = Log()
 
+        # Service manager
+        self._service = Service(self._logger, self._configuration)
+
         # Initial stylesheet load
         self._loadStylesheet()
 
@@ -213,6 +217,10 @@ class Application(QApplication):
     @property
     def configuration(self) -> Configuration:
         return self._configuration
+
+    @property
+    def service(self) -> Service:
+        return self._service
 
     @property
     def mainWindow(self):

@@ -22,6 +22,7 @@ runtime
 # Filetypes
 *.cfg
 *.log
+*.db
 
 # Unique Directories
 /tmp/

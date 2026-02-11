@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # src/core/log.py
+import os
+import re
 import threading
+from datetime import datetime
 from collections import defaultdict
 from typing import Iterable, Optional, TYPE_CHECKING
 
@@ -64,6 +67,66 @@ class Log:
         self._lock = threading.Lock()
         self._buffers: dict[str, list[str]] = defaultdict(list)
 
+        # ---------- file persistence ----------
+        # Save log lines to disk under <project_root>/log/
+        self._log_dir = self._helper.get_data_path("log",scope="system")
+        try:
+            os.makedirs(self._log_dir, exist_ok=True)
+        except Exception:
+            # If the directory cannot be created, we keep logging in memory.
+            pass
+
+        # Optional configuration toggle for file logging
+        self._configuration.add("log.persist", True, "checkbox", label="Save log to file")
+        self._configuration.save()
+
+        # Track currently used daily log file
+        self._current_log_path: str | None = None
+
+    # ---------- file persistence helpers ----------
+
+    def _safe_filename(self, name: str) -> str:
+        name = (name or "app").strip()
+        # Keep only safe characters for filenames
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+        return name or "app"
+
+    def _get_log_path(self) -> str | None:
+        # If directory creation failed earlier, bail out
+        if not os.path.isdir(self._log_dir):
+            return None
+
+        app_name = "app"
+        if self._app is not None:
+            # Prefer application name when available
+            app_name = getattr(self._app, "name", None) or getattr(self._app, "applicationName", None) or "app"
+
+        app_name = self._safe_filename(str(app_name))
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        return os.path.join(self._log_dir, f"{app_name}-{date_str}.log")
+
+    def _append_to_file(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        if not self._configuration.get("log.persist"):
+            return
+
+        path = self._get_log_path()
+        if not path:
+            return
+
+        # Write is protected by the same lock as in-memory buffers to keep ordering
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                for ln in lines:
+                    f.write(ln)
+                    if not ln.endswith("\n"):
+                        f.write("\n")
+            self._current_log_path = path
+        except Exception:
+            # Never crash the app because file logging failed
+            return
+
     # ---------- core storage ----------
 
     def append(self, message: str, channel: str = "default", level: str = "info") -> None:
@@ -85,20 +148,23 @@ class Log:
             return
 
         # Normalize to individual lines
-        lines = message.splitlines() or [message]
+        raw_lines = message.splitlines() or [message]
 
         # Format each line with timestamp, level, channel
-        for ln in lines:
-            line = f"[{self._helper.get_now()}][{level.upper()}][{channel}] {ln}"
-            lines[lines.index(ln)] = line
+        lines: list[str] = []
+        now = self._helper.get_now()
+        for ln in raw_lines:
+            line = f"[{now}][{level.upper()}][{channel}] {ln}"
+            lines.append(line)
 
             # Check if verbose logging is enabled and print to console
             if self._configuration.get("log.verbose"):
                 print(line)
 
-        # Append lines to the buffer
+        # Append lines to the buffer and persist to file (keeps ordering)
         with self._lock:
             self._buffers[channel].extend(lines)
+            self._append_to_file(lines)
 
     def extend(self, lines: Iterable[str], channel: str = "default") -> None:
         with self._lock:
@@ -175,7 +241,7 @@ class Log:
                     icon="info",
                     buttons="OK",
                     default="OK",
-                    icon_lookup_fn=self._helper.get_path,
+                    icon_lookup_fn=self._helper.get_sys_path,
                 )
                 return
 
@@ -194,7 +260,7 @@ class Log:
                     icon="info",
                     buttons="OK",
                     default="OK",
-                    icon_lookup_fn=self._helper.get_path,
+                    icon_lookup_fn=self._helper.get_sys_path,
                 )
                 return
 
@@ -210,6 +276,7 @@ class Log:
             filter_text=filter_text,
             channels_text=channels_text,
             initial_channel=channel,
+            default_save_dir=getattr(self, "_log_dir", None),
         )
         # Run the log window as a modal dialog so it appears on top and is interactive
         dlg.exec_()
@@ -224,6 +291,7 @@ class LogDialog(QDialog):
         filter_text: str | None = None,
         channels_text: Optional[dict[str, str]] = None,
         initial_channel: Optional[str] = None,
+        default_save_dir: str | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Log")
@@ -233,6 +301,7 @@ class LogDialog(QDialog):
         # Store per-channel logs (may be empty dict)
         self._channels_text: dict[str, str] = channels_text or {}
         self._current_channel: Optional[str] = initial_channel
+        self._default_save_dir = default_save_dir
 
         self._full_text = text or ""
 
@@ -290,12 +359,15 @@ class LogDialog(QDialog):
         self.apply_filter()
 
     def _copy_all(self):
-        from PyQt5.QtWidgets import QApplication
         QApplication.clipboard().setText(self.text.toPlainText())
 
     def save_as(self):
+        default_name = "log.log"
+        if self._default_save_dir:
+            default_name = os.path.join(self._default_save_dir, default_name)
+
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save log", "log.txt",
+            self, "Save log", default_name,
             "Log Files (*.log);;Text Files (*.txt);;All Files (*)"
         )
         if path:
