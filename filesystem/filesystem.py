@@ -358,12 +358,17 @@ class FileSystem:
                 dst,
                 "/MIR" if allow_deletion else "/E",
                 "/COPYALL",
-                "/DCOPY:DATSOU",
+                "/DCOPY:DAT",
                 "/SECFIX",
                 "/R:1",
                 "/W:1",
-                "/IS", # include same files (update timestamps) to better preserve metadata
-                "/IT", # include "tweaked" files (robocopy's term for files with same size but different timestamps, which can happen when metadata is preserved but not perfectly)
+                "/XJ",
+                "/FFT",
+                "/NP",
+                "/NDL",
+                "/NFL",
+                "/IS",
+                "/IT",
             ]
             return CommandSpec(argv=args, label="robocopy")
 
